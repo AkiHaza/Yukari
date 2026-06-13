@@ -4,7 +4,7 @@ CONFIG="$MODDIR/config.json"
 LOGDIR="$MODDIR/logs"
 
 mkdir -p "$LOGDIR"
-chmod 0755 "$LOGDIR"
+chmod 0777 "$LOGDIR"
 
 if [ ! -f "$CONFIG" ]; then
   cat > "$CONFIG" <<'EOF'

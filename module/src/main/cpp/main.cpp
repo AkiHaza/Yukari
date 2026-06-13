@@ -33,23 +33,23 @@ public:
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         g_enabled_for_process = false;
         g_package_name.clear();
-        if (!args || !args->nice_name || !*args->nice_name) return;
+        if (!args) return;
 
-        g_package_name = jstring_to_string(env_, *args->nice_name);
-        if (!is_target_package(g_config, g_package_name)) return;
+        g_package_name = jstring_to_string(env_, args->nice_name);
+        if (!is_target_package(g_config, g_package_name)) {
+            if (api_) api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
 
         g_enabled_for_process = true;
-        if (api_) {
-            api_->setOption(zygisk::DLCLOSE_MODULE_LIBRARY);
-            api_->setOption(zygisk::FORCE_DENYLIST_UNMOUNT);
-        }
+        if (api_) api_->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
         yukari_log_info("matched target %s", g_package_name.c_str());
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *) override {
         if (!g_enabled_for_process) return;
         clear_service_manager_cache(env_);
-        install_binder_hooks();
+        install_binder_hooks(api_);
         yukari_log_info("enabled for %s", g_package_name.c_str());
     }
 

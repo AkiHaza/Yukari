@@ -1,3 +1,5 @@
 #pragma once
 
-void install_binder_hooks();
+#include "zygisk.hpp"
+
+void install_binder_hooks(zygisk::Api *api);

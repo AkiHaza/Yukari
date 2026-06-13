@@ -2,14 +2,11 @@
 #include "logger.h"
 #include "service_match.h"
 
-#include <cerrno>
 #include <cstdint>
 #include <cstring>
-#include <dlfcn.h>
 #include <linux/android/binder.h>
 #include <string>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
 #include <unistd.h>
 
 #ifndef BC_TRANSACTION_SG
@@ -20,10 +17,6 @@ namespace {
 using IoctlFn = int (*)(int, unsigned long, void *);
 IoctlFn g_original_ioctl = nullptr;
 bool g_hook_installed = false;
-
-constexpr size_t kPatchSize = 16;
-uint8_t g_original_bytes[kPatchSize]{};
-void *g_ioctl_symbol = nullptr;
 thread_local bool g_waiting_for_service_manager_reply = false;
 
 struct binder_transaction_data_sg_local {
@@ -31,40 +24,8 @@ struct binder_transaction_data_sg_local {
     binder_size_t buffers_size;
 };
 
-bool make_writable(void *addr) {
-    const long page_size = sysconf(_SC_PAGESIZE);
-    const uintptr_t page = reinterpret_cast<uintptr_t>(addr) & ~(static_cast<uintptr_t>(page_size) - 1);
-    return mprotect(reinterpret_cast<void *>(page), static_cast<size_t>(page_size), PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
-}
-
-void write_abs_jump(void *target, void *replacement) {
-#if defined(__aarch64__)
-    uint32_t patch[4] = {
-        0x58000051u,
-        0xd61f0220u,
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(replacement) & 0xffffffffu),
-        static_cast<uint32_t>((reinterpret_cast<uintptr_t>(replacement) >> 32u) & 0xffffffffu),
-    };
-    std::memcpy(target, patch, sizeof(patch));
-    __builtin___clear_cache(reinterpret_cast<char *>(target), reinterpret_cast<char *>(target) + sizeof(patch));
-#else
-    (void)target;
-    (void)replacement;
-#endif
-}
-
-void *create_trampoline(void *target) {
-#if defined(__aarch64__)
-    void *memory = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (memory == MAP_FAILED) return nullptr;
-    std::memcpy(memory, target, kPatchSize);
-    write_abs_jump(reinterpret_cast<uint8_t *>(memory) + kPatchSize, reinterpret_cast<uint8_t *>(target) + kPatchSize);
-    __builtin___clear_cache(reinterpret_cast<char *>(memory), reinterpret_cast<char *>(memory) + kPatchSize * 2);
-    return memory;
-#else
-    (void)target;
-    return nullptr;
-#endif
+size_t align4(size_t value) {
+    return (value + 3u) & ~static_cast<size_t>(3u);
 }
 
 std::string utf16_to_ascii(const char16_t *chars, int32_t len) {
@@ -78,6 +39,26 @@ std::string utf16_to_ascii(const char16_t *chars, int32_t len) {
     return ascii;
 }
 
+bool is_probable_parcel_string16(const uint8_t *parcel, size_t size, size_t off, int32_t len) {
+    if (!parcel || (off & 0x3u) != 0 || len <= 0 || len > 512) return false;
+    const size_t str_off = off + sizeof(int32_t);
+    const size_t bytes = static_cast<size_t>(len) * sizeof(char16_t);
+    const size_t terminator_off = str_off + bytes;
+    const size_t next_off = align4(terminator_off + sizeof(char16_t));
+    if (next_off > size) return false;
+
+    char16_t terminator = 1;
+    std::memcpy(&terminator, parcel + terminator_off, sizeof(terminator));
+    if (terminator != 0) return false;
+
+    for (int32_t i = 0; i < len; ++i) {
+        char16_t c = 0;
+        std::memcpy(&c, parcel + str_off + static_cast<size_t>(i) * sizeof(char16_t), sizeof(c));
+        if (c < 0x20 || c > 0x7e) return false;
+    }
+    return true;
+}
+
 void overwrite_utf16(char16_t *chars, int32_t len) {
     if (!chars || len <= 0) return;
     for (int32_t i = 0; i < len; ++i) chars[i] = u'_';
@@ -86,15 +67,12 @@ void overwrite_utf16(char16_t *chars, int32_t len) {
 int scrub_service_strings(uint8_t *parcel, size_t size, const char *source) {
     if (!parcel || size < sizeof(int32_t)) return 0;
     int hits = 0;
-    for (size_t off = 0; off + sizeof(int32_t) < size; ++off) {
+    for (size_t off = 0; off + sizeof(int32_t) < size; off += sizeof(uint32_t)) {
         int32_t len = 0;
         std::memcpy(&len, parcel + off, sizeof(len));
-        if (len <= 0 || len > 512) continue;
-        const size_t str_off = off + sizeof(int32_t);
-        const size_t bytes = static_cast<size_t>(len) * sizeof(char16_t);
-        if (str_off + bytes > size) continue;
+        if (!is_probable_parcel_string16(parcel, size, off, len)) continue;
 
-        auto *chars = reinterpret_cast<char16_t *>(parcel + str_off);
+        auto *chars = reinterpret_cast<char16_t *>(parcel + off + sizeof(int32_t));
         const std::string value = utf16_to_ascii(chars, len);
         if (should_hide_service(value)) {
             overwrite_utf16(chars, len);
@@ -199,43 +177,22 @@ int hooked_ioctl(int fd, unsigned long request, void *arg) {
     if (ret == 0) process_binder_read_buffer(bwr);
     return ret;
 }
-
-bool install_inline_hook(void *symbol, void *replacement, void **original) {
-#if defined(__aarch64__)
-    if (!symbol || !replacement || !original) return false;
-    void *trampoline = create_trampoline(symbol);
-    if (!trampoline) return false;
-    std::memcpy(g_original_bytes, symbol, kPatchSize);
-    if (!make_writable(symbol)) return false;
-    write_abs_jump(symbol, replacement);
-    *original = trampoline;
-    g_ioctl_symbol = symbol;
-    return true;
-#else
-    (void)symbol;
-    (void)replacement;
-    (void)original;
-    return false;
-#endif
-}
 } // namespace
 
-void install_binder_hooks() {
+void install_binder_hooks(zygisk::Api *api) {
     if (g_hook_installed) return;
-    void *handle = dlopen("libc.so", RTLD_NOW);
-    if (!handle) {
-        yukari_log_error("dlopen libc.so failed: %s", dlerror());
+    if (!api) {
+        yukari_log_error("zygisk api is null; cannot install binder hook");
         return;
     }
-    void *symbol = dlsym(handle, "ioctl");
-    if (!symbol) {
-        yukari_log_error("dlsym ioctl failed: %s", dlerror());
+
+    api->pltHookRegister(".*libbinder.*\\.so$", "ioctl", reinterpret_cast<void *>(hooked_ioctl),
+                         reinterpret_cast<void **>(&g_original_ioctl));
+    if (!api->pltHookCommit() || !g_original_ioctl) {
+        yukari_log_error("zygisk plt ioctl hook failed");
         return;
     }
-    if (!install_inline_hook(symbol, reinterpret_cast<void *>(hooked_ioctl), reinterpret_cast<void **>(&g_original_ioctl))) {
-        yukari_log_error("inline ioctl hook failed errno=%d", errno);
-        return;
-    }
+
     g_hook_installed = true;
-    yukari_log_info("ioctl hook installed at %p", g_ioctl_symbol);
+    yukari_log_info("zygisk plt ioctl hook installed at %p", reinterpret_cast<void *>(g_original_ioctl));
 }

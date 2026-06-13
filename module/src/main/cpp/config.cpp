@@ -1,6 +1,7 @@
 #include "config.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <string>
 
@@ -21,21 +22,101 @@ std::string read_file(const char *path) {
     return out;
 }
 
-std::vector<std::string> parse_targets_lenient(const std::string &text) {
-    std::vector<std::string> targets;
-    const auto key = text.find("\"targets\"");
-    if (key == std::string::npos) return targets;
-    const auto begin = text.find('[', key);
-    const auto end = text.find(']', begin);
-    if (begin == std::string::npos || end == std::string::npos || end <= begin) return targets;
+void skip_ws(const std::string &text, size_t &pos) {
+    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
+}
 
-    size_t pos = begin;
-    while ((pos = text.find('"', pos + 1)) != std::string::npos && pos < end) {
-        const auto close = text.find('"', pos + 1);
-        if (close == std::string::npos || close > end) break;
-        auto value = text.substr(pos + 1, close - pos - 1);
+bool parse_json_string(const std::string &text, size_t &pos, std::string &out) {
+    skip_ws(text, pos);
+    if (pos >= text.size() || text[pos] != '"') return false;
+    ++pos;
+    out.clear();
+    while (pos < text.size()) {
+        const char c = text[pos++];
+        if (c == '"') return true;
+        if (c == '\\') {
+            if (pos >= text.size()) return false;
+            const char escaped = text[pos++];
+            switch (escaped) {
+                case '"':
+                case '\\':
+                case '/':
+                    out.push_back(escaped);
+                    break;
+                case 'b':
+                    out.push_back('\b');
+                    break;
+                case 'f':
+                    out.push_back('\f');
+                    break;
+                case 'n':
+                    out.push_back('\n');
+                    break;
+                case 'r':
+                    out.push_back('\r');
+                    break;
+                case 't':
+                    out.push_back('\t');
+                    break;
+                default:
+                    return false;
+            }
+        } else {
+            out.push_back(c);
+        }
+    }
+    return false;
+}
+
+bool find_value_start(const std::string &text, const char *key, size_t &pos) {
+    std::string quoted_key = std::string("\"") + key + "\"";
+    const auto key_pos = text.find(quoted_key);
+    if (key_pos == std::string::npos) return false;
+    pos = key_pos + quoted_key.size();
+    skip_ws(text, pos);
+    if (pos >= text.size() || text[pos] != ':') return false;
+    ++pos;
+    skip_ws(text, pos);
+    return pos < text.size();
+}
+
+bool parse_enabled(const std::string &text, bool &enabled) {
+    size_t pos = 0;
+    if (!find_value_start(text, "enabled", pos)) return false;
+    if (text.compare(pos, 4, "true") == 0) {
+        enabled = true;
+        return true;
+    }
+    if (text.compare(pos, 5, "false") == 0) {
+        enabled = false;
+        return true;
+    }
+    return false;
+}
+
+std::vector<std::string> parse_targets(const std::string &text) {
+    std::vector<std::string> targets;
+    size_t pos = 0;
+    if (!find_value_start(text, "targets", pos)) return targets;
+    if (text[pos] != '[') return targets;
+    ++pos;
+
+    while (pos < text.size()) {
+        skip_ws(text, pos);
+        if (pos >= text.size()) break;
+        if (text[pos] == ']') break;
+
+        std::string value;
+        if (!parse_json_string(text, pos, value)) break;
         if (!value.empty()) targets.push_back(value);
-        pos = close;
+
+        skip_ws(text, pos);
+        if (pos < text.size() && text[pos] == ',') {
+            ++pos;
+            continue;
+        }
+        if (pos < text.size() && text[pos] == ']') break;
+        break;
     }
     return targets;
 }
@@ -47,14 +128,11 @@ bool load_config(YukariConfig &out) {
         out = {};
         return false;
     }
-    const auto enabled_key = text.find("\"enabled\"");
-    const auto false_value = enabled_key == std::string::npos
-        ? std::string::npos
-        : text.find("false", enabled_key);
-    const auto targets_key = text.find("\"targets\"");
-    out.enabled = false_value == std::string::npos ||
-                  (targets_key != std::string::npos && false_value > targets_key);
-    out.targets = parse_targets_lenient(text);
+
+    out = {};
+    out.enabled = true;
+    parse_enabled(text, out.enabled);
+    out.targets = parse_targets(text);
     return true;
 }
 

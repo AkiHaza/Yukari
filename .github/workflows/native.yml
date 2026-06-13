@@ -44,6 +44,9 @@ jobs:
           unzip -l out/Yukari.zip | grep -q 'zygisk/arm64-v8a.so'
           unzip -l out/Yukari-debug.zip | grep -q 'module.prop'
           unzip -l out/Yukari-debug.zip | grep -q 'zygisk/arm64-v8a.so'
+          unzip -p out/Yukari.zip zygisk/arm64-v8a.so > /tmp/yukari.so
+          readelf -Ws /tmp/yukari.so | grep -q 'zygisk_module_entry'
+          ! readelf -Ws /tmp/yukari.so | grep -q 'zygisk_module_create'
 
       - name: Upload Yukari modules
         uses: actions/upload-artifact@v4
