@@ -4,12 +4,14 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <linux/android/binder.h>
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <vector>
 
 #ifndef BC_TRANSACTION_SG
 #define BC_TRANSACTION_SG _IOW('c', 17, struct binder_transaction_data_sg)
@@ -30,6 +32,12 @@ struct binder_transaction_data_sg_local {
     binder_size_t buffers_size;
 };
 
+struct MemoryRangeProt {
+    uintptr_t begin = 0;
+    uintptr_t end = 0;
+    int prot = 0;
+};
+
 size_t align4(size_t value) {
     return (value + 3u) & ~static_cast<size_t>(3u);
 }
@@ -45,16 +53,62 @@ std::string utf16_to_ascii(const char16_t *chars, int32_t len) {
     return ascii;
 }
 
-bool set_buffer_writable(void *addr, size_t size, bool writable) {
+int parse_maps_prot(const char *perms) {
+    int prot = 0;
+    if (perms[0] == 'r') prot |= PROT_READ;
+    if (perms[1] == 'w') prot |= PROT_WRITE;
+    if (perms[2] == 'x') prot |= PROT_EXEC;
+    return prot;
+}
+
+bool collect_range_protections(void *addr, size_t size, std::vector<MemoryRangeProt> &ranges) {
+    ranges.clear();
     if (!addr || size == 0) return false;
+
+    const uintptr_t target_begin = reinterpret_cast<uintptr_t>(addr);
+    const uintptr_t target_end = target_begin + size;
+    FILE *fp = std::fopen("/proc/self/maps", "r");
+    if (!fp) return false;
+
+    char line[512]{};
+    while (std::fgets(line, sizeof(line), fp)) {
+        unsigned long long begin = 0;
+        unsigned long long end = 0;
+        char perms[5]{};
+        if (std::sscanf(line, "%llx-%llx %4s", &begin, &end, perms) != 3) continue;
+        if (end <= target_begin || begin >= target_end) continue;
+
+        MemoryRangeProt range{};
+        range.begin = static_cast<uintptr_t>(begin) > target_begin ? static_cast<uintptr_t>(begin) : target_begin;
+        range.end = static_cast<uintptr_t>(end) < target_end ? static_cast<uintptr_t>(end) : target_end;
+        range.prot = parse_maps_prot(perms);
+        ranges.push_back(range);
+    }
+    std::fclose(fp);
+
+    if (ranges.empty()) return false;
+    uintptr_t covered = target_begin;
+    for (const auto &range : ranges) {
+        if (range.begin > covered) return false;
+        if (range.end > covered) covered = range.end;
+    }
+    return covered >= target_end;
+}
+
+bool apply_range_protections(const std::vector<MemoryRangeProt> &ranges, bool force_writable) {
     const long page_size_raw = sysconf(_SC_PAGESIZE);
     if (page_size_raw <= 0) return false;
-
     const uintptr_t page_size = static_cast<uintptr_t>(page_size_raw);
-    const uintptr_t begin = reinterpret_cast<uintptr_t>(addr) & ~(page_size - 1u);
-    const uintptr_t end = (reinterpret_cast<uintptr_t>(addr) + size + page_size - 1u) & ~(page_size - 1u);
-    const int prot = writable ? (PROT_READ | PROT_WRITE) : PROT_READ;
-    return mprotect(reinterpret_cast<void *>(begin), static_cast<size_t>(end - begin), prot) == 0;
+
+    for (const auto &range : ranges) {
+        const uintptr_t begin = range.begin & ~(page_size - 1u);
+        const uintptr_t end = (range.end + page_size - 1u) & ~(page_size - 1u);
+        const int prot = force_writable ? (range.prot | PROT_WRITE) : range.prot;
+        if (mprotect(reinterpret_cast<void *>(begin), static_cast<size_t>(end - begin), prot) != 0) {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool is_probable_parcel_string16(const uint8_t *parcel, size_t size, size_t off, int32_t len) {
@@ -117,14 +171,21 @@ void process_reply_transaction(const binder_transaction_data &txn) {
 
     auto *parcel = reinterpret_cast<uint8_t *>(txn.data.ptr.buffer);
     const size_t data_size = static_cast<size_t>(txn.data_size);
-    const bool made_writable = set_buffer_writable(parcel, data_size, true);
-    if (!made_writable) {
-        yukari_log_error("reply buffer is read-only and mprotect failed errno=%d", errno);
+    std::vector<MemoryRangeProt> ranges;
+    if (!collect_range_protections(parcel, data_size, ranges)) {
+        yukari_log_error("failed to read reply buffer permissions errno=%d", errno);
+        return;
+    }
+
+    if (!apply_range_protections(ranges, true)) {
+        yukari_log_error("failed to make reply buffer writable errno=%d", errno);
         return;
     }
 
     const int hits = scrub_service_strings(parcel, data_size, "reply");
-    set_buffer_writable(parcel, data_size, false);
+    if (!apply_range_protections(ranges, false)) {
+        yukari_log_error("failed to restore reply buffer permissions errno=%d", errno);
+    }
     if (hits > 0) yukari_log_info("filtered %d service-manager reply item(s)", hits);
 }
 
