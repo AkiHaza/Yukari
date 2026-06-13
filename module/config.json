@@ -1,4 +1,7 @@
 {
   "enabled": true,
-  "targets": []
+  "targets": [
+    "com.eltavine.duckdetector",
+    "com.reveny.nativecheck"
+  ]
 }
