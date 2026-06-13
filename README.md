@@ -1,13 +1,13 @@
 # Yukari
 
-Zygisk Next module that hides selected custom-ROM service signals from configured target applications.
+Zygisk module that hides selected custom-ROM service signals from configured target applications.
 
 ## Module identity
 
 - Name: `Yukari`
 - Module ID: `Yukari`
 - Configuration: `/data/adb/modules/Yukari/config.json`
-- Runtime: Zygisk Next, `arm64-v8a`
+- Runtime: standard Zygisk-compatible loader, tested target is Zygisk Next on `arm64-v8a`
 
 ## Fixed service keywords
 
@@ -41,7 +41,7 @@ Debug logs are written by injected target processes to:
 - Java `ServiceManager.sCache` entries containing fixed ROM keywords are removed.
 - Binder request filtering rewrites matching service lookup names before they reach ServiceManager.
 - Binder reply filtering rewrites matching `listServices` / service-manager reply names before the target app reads them.
-- Binder interception uses Zygisk's PLT hook API instead of patching libc inline.
+- Binder interception uses Zygisk's standard PLT hook API instead of patching libc inline.
 
 Reply filtering uses same-length placeholders instead of changing Parcel size. This removes Duck-style keyword hits while preserving Binder parcel layout.
 

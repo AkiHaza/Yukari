@@ -1,5 +1,5 @@
 // This is the public API for Zygisk modules.
-// DO NOT MODIFY ANY CODE IN THIS HEADER.
+// Keep this header ABI-compatible with standard Zygisk loaders.
 
 #pragma once
 
@@ -15,11 +15,11 @@ struct ServerSpecializeArgs;
 
 class ModuleBase {
 public:
-    virtual void onLoad(Api *api, JNIEnv *env) {}
-    virtual void preAppSpecialize(AppSpecializeArgs *args) {}
-    virtual void postAppSpecialize(const AppSpecializeArgs *args) {}
-    virtual void preServerSpecialize(ServerSpecializeArgs *args) {}
-    virtual void postServerSpecialize(const ServerSpecializeArgs *args) {}
+    virtual void onLoad([[maybe_unused]] Api *api, [[maybe_unused]] JNIEnv *env) {}
+    virtual void preAppSpecialize([[maybe_unused]] AppSpecializeArgs *args) {}
+    virtual void postAppSpecialize([[maybe_unused]] const AppSpecializeArgs *args) {}
+    virtual void preServerSpecialize([[maybe_unused]] ServerSpecializeArgs *args) {}
+    virtual void postServerSpecialize([[maybe_unused]] const ServerSpecializeArgs *args) {}
 };
 
 struct AppSpecializeArgs {
@@ -78,11 +78,13 @@ private:
 };
 
 #define REGISTER_ZYGISK_MODULE(clazz) \
+extern "C" __attribute__((visibility("default"), used)) \
 void zygisk_module_entry(zygisk::internal::api_table *table, JNIEnv *env) { \
     zygisk::internal::entry_impl<clazz>(table, env); \
 }
 
 #define REGISTER_ZYGISK_COMPANION(func) \
+extern "C" __attribute__((visibility("default"), used)) \
 void zygisk_companion_entry(int client) { func(client); }
 
 namespace internal {
@@ -96,7 +98,7 @@ struct module_abi {
     void (*preServerSpecialize)(ModuleBase *, ServerSpecializeArgs *);
     void (*postServerSpecialize)(ModuleBase *, const ServerSpecializeArgs *);
 
-    module_abi(ModuleBase *module) : api_version(ZYGISK_API_VERSION), _this(module) {
+    explicit module_abi(ModuleBase *module) : api_version(ZYGISK_API_VERSION), _this(module) {
         preAppSpecialize = [](auto self, auto args) { self->preAppSpecialize(args); };
         postAppSpecialize = [](auto self, auto args) { self->postAppSpecialize(args); };
         preServerSpecialize = [](auto self, auto args) { self->preServerSpecialize(args); };
@@ -154,6 +156,3 @@ inline bool Api::pltHookCommit() {
 }
 
 } // namespace zygisk
-
-[[gnu::visibility("default")]] [[gnu::used]]
-extern "C" void zygisk_module_entry(zygisk::internal::api_table *, JNIEnv *);
