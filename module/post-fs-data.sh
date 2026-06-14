@@ -10,6 +10,7 @@ if [ ! -f "$CONFIG" ]; then
   cat > "$CONFIG" <<'EOF'
 {
   "enabled": true,
+  "enhancedMode": false,
   "targets": []
 }
 EOF

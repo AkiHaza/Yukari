@@ -36,7 +36,8 @@ Debug logs are written to logcat with tag `Yukari`.
 - Zygisk app specialization matches configured target packages.
 - Java `ServiceManager.sCache` entries containing fixed ROM keywords are removed.
 - Binder request filtering rewrites matching service lookup names before they reach ServiceManager.
-- Binder reply filtering is attempted only when the reply buffer is already writable; read-only Binder buffers are skipped to keep buffer ownership and page permissions safe.
+- Binder reply filtering is attempted only when the reply buffer is already writable.
+- Optional enhanced mode can filter read-only Binder replies by swapping the reply buffer pointer to a modified userspace copy. This can hide `listServices` results, but it is unsafe because Binder buffer ownership no longer matches the pointer libbinder sees.
 - Binder interception uses Zygisk's standard PLT hook API instead of patching libc inline.
 
 Request/reply filtering uses same-length placeholders instead of changing Parcel size.
@@ -46,11 +47,14 @@ Request/reply filtering uses same-length placeholders instead of changing Parcel
 ```json
 {
   "enabled": true,
+  "enhancedMode": false,
   "targets": [
     "com.example.app"
   ]
 }
 ```
+
+Set `enhancedMode` to `true` only for testing if you accept the Binder buffer ownership risk.
 
 ## Build
 

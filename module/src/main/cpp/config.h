@@ -5,6 +5,7 @@
 
 struct YukariConfig {
     bool enabled = false;
+    bool enhanced_mode = false;
     std::vector<std::string> targets;
 };
 

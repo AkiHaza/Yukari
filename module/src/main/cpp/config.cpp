@@ -80,15 +80,15 @@ bool find_value_start(const std::string &text, const char *key, size_t &pos) {
     return pos < text.size();
 }
 
-bool parse_enabled(const std::string &text, bool &enabled) {
+bool parse_bool_field(const std::string &text, const char *key, bool &value) {
     size_t pos = 0;
-    if (!find_value_start(text, "enabled", pos)) return false;
+    if (!find_value_start(text, key, pos)) return false;
     if (text.compare(pos, 4, "true") == 0) {
-        enabled = true;
+        value = true;
         return true;
     }
     if (text.compare(pos, 5, "false") == 0) {
-        enabled = false;
+        value = false;
         return true;
     }
     return false;
@@ -131,7 +131,9 @@ bool load_config(YukariConfig &out) {
 
     out = {};
     out.enabled = true;
-    parse_enabled(text, out.enabled);
+    out.enhanced_mode = false;
+    parse_bool_field(text, "enabled", out.enabled);
+    parse_bool_field(text, "enhancedMode", out.enhanced_mode);
     out.targets = parse_targets(text);
     return true;
 }
