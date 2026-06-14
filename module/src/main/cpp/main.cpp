@@ -1,6 +1,7 @@
 #include "binder_hook.h"
 #include "config.h"
 #include "logger.h"
+#include "seccomp_guard.h"
 #include "service_cache.h"
 #include "zygisk.hpp"
 
@@ -48,6 +49,7 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *) override {
         if (!g_enabled_for_process) return;
+        install_seccomp_probe_guard();
         clear_service_manager_cache(env_);
         install_binder_hooks(api_);
         yukari_log_info("enabled for %s", g_package_name.c_str());
