@@ -37,7 +37,6 @@ Debug logs are written to logcat with tag `Yukari`.
 - Java `ServiceManager.sCache` entries containing fixed ROM keywords are removed.
 - Binder request filtering rewrites matching service lookup names before they reach ServiceManager.
 - Binder reply filtering is attempted only when the reply buffer is already writable; read-only Binder buffers are skipped to keep buffer ownership and page permissions safe.
-- DuckDetector's blocked KSU supercall probe is converted into an `ENOSYS` result to avoid SIGSYS process termination.
 - Binder interception uses Zygisk's standard PLT hook API instead of patching libc inline.
 
 Request/reply filtering uses same-length placeholders instead of changing Parcel size.
