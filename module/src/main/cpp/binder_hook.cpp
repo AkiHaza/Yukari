@@ -2,7 +2,6 @@
 #include "logger.h"
 #include "service_match.h"
 
-#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -10,6 +9,7 @@
 #include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/sysmacros.h>
 #include <unistd.h>
 #include <vector>
 
@@ -30,6 +30,11 @@ thread_local int g_pending_service_manager_replies = 0;
 struct binder_transaction_data_sg_local {
     binder_transaction_data transaction_data;
     binder_size_t buffers_size;
+};
+
+struct ElfMappingId {
+    dev_t dev = 0;
+    ino_t inode = 0;
 };
 
 struct MemoryRangeProt {
@@ -95,20 +100,11 @@ bool collect_range_protections(void *addr, size_t size, std::vector<MemoryRangeP
     return covered >= target_end;
 }
 
-bool apply_range_protections(const std::vector<MemoryRangeProt> &ranges, bool force_writable) {
-    const long page_size_raw = sysconf(_SC_PAGESIZE);
-    if (page_size_raw <= 0) return false;
-    const uintptr_t page_size = static_cast<uintptr_t>(page_size_raw);
-
+bool range_is_writable(const std::vector<MemoryRangeProt> &ranges) {
     for (const auto &range : ranges) {
-        const uintptr_t begin = range.begin & ~(page_size - 1u);
-        const uintptr_t end = (range.end + page_size - 1u) & ~(page_size - 1u);
-        const int prot = force_writable ? (range.prot | PROT_WRITE) : range.prot;
-        if (mprotect(reinterpret_cast<void *>(begin), static_cast<size_t>(end - begin), prot) != 0) {
-            return false;
-        }
+        if ((range.prot & PROT_WRITE) == 0) return false;
     }
-    return true;
+    return !ranges.empty();
 }
 
 bool is_probable_parcel_string16(const uint8_t *parcel, size_t size, size_t off, int32_t len) {
@@ -173,19 +169,15 @@ void process_reply_transaction(const binder_transaction_data &txn) {
     const size_t data_size = static_cast<size_t>(txn.data_size);
     std::vector<MemoryRangeProt> ranges;
     if (!collect_range_protections(parcel, data_size, ranges)) {
-        yukari_log_error("failed to read reply buffer permissions errno=%d", errno);
+        yukari_log_error("failed to read reply buffer permissions");
         return;
     }
-
-    if (!apply_range_protections(ranges, true)) {
-        yukari_log_error("failed to make reply buffer writable errno=%d", errno);
+    if (!range_is_writable(ranges)) {
+        yukari_log_info("reply buffer is not writable; skipping reply filtering");
         return;
     }
 
     const int hits = scrub_service_strings(parcel, data_size, "reply");
-    if (!apply_range_protections(ranges, false)) {
-        yukari_log_error("failed to restore reply buffer permissions errno=%d", errno);
-    }
     if (hits > 0) yukari_log_info("filtered %d service-manager reply item(s)", hits);
 }
 
@@ -272,6 +264,42 @@ int hooked_ioctl(int fd, unsigned long request, void *arg) {
     if (ret == 0) process_binder_read_buffer(bwr);
     return ret;
 }
+
+bool mapping_seen(const std::vector<ElfMappingId> &mappings, dev_t dev, ino_t inode) {
+    for (const auto &mapping : mappings) {
+        if (mapping.dev == dev && mapping.inode == inode) return true;
+    }
+    return false;
+}
+
+std::vector<ElfMappingId> find_libbinder_mappings() {
+    std::vector<ElfMappingId> mappings;
+    FILE *fp = std::fopen("/proc/self/maps", "r");
+    if (!fp) return mappings;
+
+    char line[1024]{};
+    while (std::fgets(line, sizeof(line), fp)) {
+        unsigned long long begin = 0;
+        unsigned long long end = 0;
+        unsigned long long offset = 0;
+        unsigned int major_id = 0;
+        unsigned int minor_id = 0;
+        unsigned long long inode = 0;
+        char perms[5]{};
+        char path[512]{};
+        const int fields = std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu %511s", &begin, &end,
+                                       perms, &offset, &major_id, &minor_id, &inode, path);
+        if (fields < 8 || inode == 0) continue;
+        const std::string pathname = path;
+        if (pathname.find("/libbinder.so") == std::string::npos) continue;
+
+        const dev_t dev = makedev(major_id, minor_id);
+        const auto ino = static_cast<ino_t>(inode);
+        if (!mapping_seen(mappings, dev, ino)) mappings.push_back({dev, ino});
+    }
+    std::fclose(fp);
+    return mappings;
+}
 } // namespace
 
 void install_binder_hooks(zygisk::Api *api) {
@@ -281,13 +309,21 @@ void install_binder_hooks(zygisk::Api *api) {
         return;
     }
 
-    api->pltHookRegister(".*libbinder.*\\.so$", "ioctl", reinterpret_cast<void *>(hooked_ioctl),
-                         reinterpret_cast<void **>(&g_original_ioctl));
+    const auto mappings = find_libbinder_mappings();
+    if (mappings.empty()) {
+        yukari_log_error("libbinder mapping not found; cannot install ioctl hook");
+        return;
+    }
+
+    for (const auto &mapping : mappings) {
+        api->pltHookRegister(mapping.dev, mapping.inode, "ioctl", reinterpret_cast<void *>(hooked_ioctl),
+                             reinterpret_cast<void **>(&g_original_ioctl));
+    }
     if (!api->pltHookCommit() || !g_original_ioctl) {
         yukari_log_error("zygisk plt ioctl hook failed");
         return;
     }
 
     g_hook_installed = true;
-    yukari_log_info("zygisk plt ioctl hook installed at %p", reinterpret_cast<void *>(g_original_ioctl));
+    yukari_log_info("zygisk plt ioctl hook installed for %zu libbinder mapping(s)", mappings.size());
 }
