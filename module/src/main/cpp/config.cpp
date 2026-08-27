@@ -3,10 +3,12 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace {
 constexpr const char *kConfigPath = "/data/adb/modules/Yukari/config.json";
+constexpr size_t kMaxConfigBytes = 64 * 1024;
 
 std::string read_file(const char *path) {
     FILE *fp = std::fopen(path, "rb");
@@ -16,6 +18,10 @@ std::string read_file(const char *path) {
     while (true) {
         size_t n = std::fread(buffer, 1, sizeof(buffer), fp);
         if (n > 0) out.append(buffer, n);
+        if (out.size() > kMaxConfigBytes) {
+            std::fclose(fp);
+            return {};
+        }
         if (n < sizeof(buffer)) break;
     }
     std::fclose(fp);
@@ -120,6 +126,41 @@ std::vector<std::string> parse_targets(const std::string &text) {
     }
     return targets;
 }
+
+bool is_protected_package(const std::string &package_name) {
+    // These components are queried very early by framework/application
+    // startup code.  Filtering them can turn a recoverable lookup into an
+    // NPE or an unusable process.  action.sh enumerates -3 packages, but keep
+    // this guard for hand-edited configurations as well.
+    constexpr const char *kProtected[] = {
+        "android",
+        "system",
+        "system_server",
+        "com.android.systemui",
+        "com.android.settings",
+        "com.android.permissioncontroller",
+        "com.android.packageinstaller",
+        "com.android.providers.settings",
+        "com.android.providers.media",
+        "com.android.providers.downloads",
+        "com.android.providers.contacts",
+        "com.android.providers.calendar",
+        "com.android.providers.telephony",
+        "com.android.providers.blockednumber",
+        "com.android.documentsui",
+        "com.android.externalstorage",
+        "com.android.phone",
+        "com.android.server.telecom",
+        "com.android.bluetooth",
+        "com.android.nfc",
+        "com.android.inputmethod.latin",
+        "com.google.android.permissioncontroller",
+    };
+    for (const char *protected_name : kProtected) {
+        if (std::strcmp(package_name.c_str(), protected_name) == 0) return true;
+    }
+    return false;
+}
 } // namespace
 
 bool load_config(YukariConfig &out) {
@@ -132,21 +173,13 @@ bool load_config(YukariConfig &out) {
     out = {};
     out.enabled = true;
     parse_bool(text, "enabled", out.enabled);
+    parse_bool(text, "force_denylist_unmount", out.force_denylist_unmount);
     out.targets = parse_targets(text);
     return true;
 }
 
 bool is_target(const YukariConfig &config, const std::string &package_name) {
     if (!config.enabled || package_name.empty()) return false;
-    static const std::vector<std::string> protected_packages = {
-        "android",
-        "system",
-        "system_server",
-        "com.android.systemui",
-        "com.android.settings",
-    };
-    if (std::find(protected_packages.begin(), protected_packages.end(), package_name) != protected_packages.end()) {
-        return false;
-    }
+    if (is_protected_package(package_name)) return false;
     return std::find(config.targets.begin(), config.targets.end(), package_name) != config.targets.end();
 }

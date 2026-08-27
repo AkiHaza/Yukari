@@ -1,4 +1,5 @@
 {
   "enabled": true,
+  "force_denylist_unmount": true,
   "targets": []
 }

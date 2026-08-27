@@ -28,13 +28,23 @@ commands.
 ```json
 {
   "enabled": true,
+  "force_denylist_unmount": true,
   "targets": ["com.example.app"]
 }
 ```
 
+Set `force_denylist_unmount` to `false` on devices where target apps depend
+on Magisk-provided mounts; service filtering remains enabled.
+
+Run `module/action.sh` (installed as `/data/adb/modules/Yukari/action.sh`) to
+select targets. `a` merges all discovered third-party apps, `s` merges selected
+numbers, `r` replaces targets, `k` preserves the current list, and `q` cancels.
+When no terminal is available the script preserves the existing configuration.
+Owner, secondary-user and work-profile package lists are merged.
+
 ## Build
 
 ```bash
-gradle :module:assembleRelease
+./gradlew :module:assembleRelease
 bash scripts/package.sh
 ```

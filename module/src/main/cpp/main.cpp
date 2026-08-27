@@ -7,6 +7,7 @@
 #include <jni.h>
 #include <array>
 #include <cstring>
+#include <new>
 #include <string>
 
 namespace {
@@ -32,7 +33,11 @@ public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
         api_ = api;
         env_ = env;
-        if (!g_config) g_config = new YukariConfig();
+        if (!g_config) g_config = new (std::nothrow) YukariConfig();
+        if (!g_config) {
+            log_error("configuration allocation failed; module disabled");
+            return;
+        }
         load_config(*g_config);
     }
 
@@ -56,7 +61,9 @@ public:
         }
 
         g_enabled_for_process = true;
-        if (api_) api_->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
+        if (api_ && g_config->force_denylist_unmount) {
+            api_->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
+        }
         // The Zygisk API is guaranteed to be live in preAppSpecialize.  Hook
         // the boot-class native method here, before post-specialization API
         // calls become implementation-defined.

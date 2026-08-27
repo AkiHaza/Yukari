@@ -96,6 +96,10 @@ void clear_cache(JNIEnv *env) {
         env->DeleteLocalRef(key);
     }
 
+    // A failed GetStringUTFChars (for example, transient OOM) leaves a
+    // pending JNI exception.  Do not leak it into application startup.
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
     env->DeleteLocalRef(keys);
     env->DeleteLocalRef(set_class);
     env->DeleteLocalRef(keys_obj);

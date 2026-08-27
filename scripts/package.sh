@@ -8,6 +8,8 @@ STAGE="$OUT_DIR/Yukari"
 
 find_native_library() {
   local candidates=(
+    "$ROOT_DIR/module/build/intermediates/stripped_native_libs/release/out/lib/arm64-v8a/libyukari.so"
+    "$ROOT_DIR/module/build/intermediates/stripped_native_libs/release/out/lib/arm64-v8a/yukari.so"
     "$ROOT_DIR/module/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libyukari.so"
     "$ROOT_DIR/module/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/yukari.so"
     "$ROOT_DIR/module/build/intermediates/merged_native_libs/release/mergeReleaseNativeLibs/out/lib/arm64-v8a/libyukari.so"

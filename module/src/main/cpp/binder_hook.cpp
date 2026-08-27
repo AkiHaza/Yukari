@@ -3,6 +3,7 @@
 #include "service_cache.h"
 #include "service_match.h"
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -28,8 +29,10 @@
 #define BC_FREE_BUFFER _IOW('c', 3, binder_uintptr_t)
 #endif
 
-// Max reply buffer size for swap (32KB, enough for listServices/getServiceDebugInfo)
-#define MAX_REPLY_BUF (32 * 1024)
+// Max reply buffer size for swap.  Keep the historical 256 KiB ceiling so
+// large OEM service/debug enumerations are still filtered; allocation remains
+// lazy and only occurs when a matching reply is received.
+#define MAX_REPLY_BUF (256 * 1024)
 
 namespace {
 using IoctlFn = int (*)(int, unsigned long, void *);
@@ -66,6 +69,7 @@ struct ParcelMethods {
 
 ParcelMethods g_parcel_methods;
 pthread_mutex_t g_parcel_mutex = PTHREAD_MUTEX_INITIALIZER;
+std::atomic<bool> g_parcel_methods_ready{false};
 
 // Thread local: whether the current thread has a pending synchronous
 // transaction to handle 0 (servicemanager).
@@ -105,6 +109,10 @@ unsigned char *get_swap_buf() {
 
 // Track the active swap buffer address to intercept BC_FREE_BUFFER
 thread_local void *g_active_swap_ptr = nullptr;
+// The kernel-owned reply mapping must still be released.  Keep its pointer
+// while the userspace replacement is visible to Java, then restore it in the
+// BC_FREE_BUFFER command sent back to the driver.
+thread_local binder_uintptr_t g_original_reply_ptr = 0;
 
 struct binder_transaction_data_sg_local {
     binder_transaction_data transaction_data;
@@ -125,10 +133,10 @@ void clear_jni_exception(JNIEnv *env) {
 
 bool init_parcel_methods(JNIEnv *env) {
     if (!env) return false;
-    if (g_parcel_methods.cls != nullptr) return true;
+    if (g_parcel_methods_ready.load(std::memory_order_acquire)) return true;
 
     pthread_mutex_lock(&g_parcel_mutex);
-    if (g_parcel_methods.cls != nullptr) {
+    if (g_parcel_methods_ready.load(std::memory_order_relaxed)) {
         pthread_mutex_unlock(&g_parcel_mutex);
         return true;
     }
@@ -166,6 +174,7 @@ bool init_parcel_methods(JNIEnv *env) {
     }
 
     g_parcel_methods = methods;
+    g_parcel_methods_ready.store(true, std::memory_order_release);
     pthread_mutex_unlock(&g_parcel_mutex);
     return true;
 }
@@ -197,9 +206,14 @@ jstring replacement_for(JNIEnv *env, jstring value) {
 bool parcel_has_service_manager(JNIEnv *env, jobject parcel) {
     if (!env || !parcel) return false;
     const jint original_position = env->CallIntMethod(parcel, g_parcel_methods.data_position);
-    // writeInterfaceToken prepends a kernel request header on modern Android
-    // (four ints = 16 bytes), while older releases used a 12-byte header.
-    constexpr jint kCandidateOffsets[] = {0, 12, 16};
+    if (env->ExceptionCheck() || original_position < 0) {
+        clear_jni_exception(env);
+        return false;
+    }
+    // writeInterfaceToken prepends a kernel request header.  Its size changed
+    // across releases: one int (O/P), two ints (Q), three ints (R), and four
+    // ints on newer builds.  RPC parcels have no header and use offset zero.
+    constexpr jint kCandidateOffsets[] = {0, 4, 8, 12, 16};
     for (jint offset : kCandidateOffsets) {
         env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, offset);
         jstring descriptor = static_cast<jstring>(env->CallObjectMethod(parcel, g_parcel_methods.read_string));
@@ -252,6 +266,10 @@ void filter_list_reply(JNIEnv *env, jobject parcel) {
     env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
     env->CallVoidMethod(parcel, g_parcel_methods.write_int, exception);
     env->CallVoidMethod(parcel, g_parcel_methods.write_string_array, values);
+    // BinderProxy returns reply Parcels positioned at zero.  Leave the
+    // rewritten Parcel in the same state so the generated IServiceManager
+    // proxy can call readException()/createStringArray() normally.
+    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
     clear_jni_exception(env);
     env->DeleteLocalRef(values);
 }
@@ -308,6 +326,7 @@ void filter_debug_info_reply(JNIEnv *env, jobject parcel) {
     env->CallVoidMethod(parcel, g_parcel_methods.write_int, exception);
     // The parser only changes String16 payloads in place; no need to rewrite
     // the count or the surrounding parcel data.
+    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
     clear_jni_exception(env);
 }
 
@@ -388,24 +407,48 @@ void scan_sm_reply_for_strings(uint8_t *parcel, size_t size) {
 }
 
 void process_transaction(const binder_transaction_data &txn) {
-    if (txn.data_size == 0 || txn.data.ptr.buffer == 0) return;
-    if (txn.target.handle != 0) return;
-    if (txn.flags & TF_ONE_WAY) return;
+    // Ignore unrelated transactions.  libbinder can batch one-way writes
+    // with a synchronous call; they must not cancel the pending SM reply.
+    if (txn.target.handle != 0 || (txn.flags & TF_ONE_WAY) != 0) return;
+    if (txn.data_size == 0 || txn.data.ptr.buffer == 0) {
+        g_pending_sm_reply = false;
+        return;
+    }
 
     // Do not rewrite getService/checkService requests.  Returning a null
     // binder for a framework lookup can make callers crash during startup.
     // Enumeration/debug replies are scrubbed below, which is the stable and
     // low-risk observation boundary.
-    g_pending_sm_reply = true;
+    g_pending_sm_reply = txn.code == static_cast<uint32_t>(kSvcListServices) ||
+                         txn.code == static_cast<uint32_t>(kSvcListServicesLegacy) ||
+                         txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfo) ||
+                         txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoLegacy);
 }
 
 // Copy reply to swap buffer, filter it, and replace the pointer.
 bool swap_reply_buffer(binder_transaction_data *txn) {
     if (!txn || txn->data_size == 0 || txn->data.ptr.buffer == 0) return false;
 
+    const binder_uintptr_t original_buffer = txn->data.ptr.buffer;
     const size_t data_size = static_cast<size_t>(txn->data_size);
     const size_t offsets_size = static_cast<size_t>(txn->offsets_size);
+    if ((data_size & 0x3u) != 0 || (offsets_size & (sizeof(binder_size_t) - 1u)) != 0) {
+        log_info("swap: malformed alignment (data=%zu offsets=%zu), skip", data_size, offsets_size);
+        return false;
+    }
+    if (offsets_size > 0 && txn->data.ptr.offsets == 0) {
+        log_info("swap: offsets_size without offsets pointer, skip");
+        return false;
+    }
+    if (data_size > MAX_REPLY_BUF) {
+        log_info("swap: reply data too large (%zu), skip", data_size);
+        return false;
+    }
     const size_t offsets_off = align8(data_size);
+    if (offsets_off > MAX_REPLY_BUF || offsets_size > MAX_REPLY_BUF - offsets_off) {
+        log_info("swap: reply too large (data=%zu offsets=%zu), skip", data_size, offsets_size);
+        return false;
+    }
     const size_t copy_size = offsets_off + offsets_size;
 
     if (copy_size > MAX_REPLY_BUF) {
@@ -423,7 +466,7 @@ bool swap_reply_buffer(binder_transaction_data *txn) {
         return false;
     }
 
-    std::memcpy(buf, reinterpret_cast<const void *>(txn->data.ptr.buffer), data_size);
+    std::memcpy(buf, reinterpret_cast<const void *>(original_buffer), data_size);
     if (offsets_size > 0 && txn->data.ptr.offsets != 0) {
         std::memcpy(buf + offsets_off, reinterpret_cast<const void *>(txn->data.ptr.offsets), offsets_size);
     }
@@ -436,6 +479,7 @@ bool swap_reply_buffer(binder_transaction_data *txn) {
     }
 
     g_active_swap_ptr = buf;
+    g_original_reply_ptr = original_buffer;
     log_info("swap: replaced reply buffer with lazy swap (%zu bytes)", copy_size);
     return true;
 }
@@ -475,7 +519,11 @@ void process_write(binder_write_read *bwr) {
             if (g_active_swap_ptr != nullptr &&
                 *buf_ptr == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
                 g_active_swap_ptr = nullptr;
-                *buf_ptr = 0;
+                // Pass the original mmap pointer to the binder driver so it
+                // can release the transaction buffer.  Supplying zero here
+                // leaks one kernel buffer per filtered reply.
+                *buf_ptr = g_original_reply_ptr;
+                g_original_reply_ptr = 0;
                 log_info("swap: intercepted BC_FREE_BUFFER for swap buffer");
             }
             ptr += sizeof(binder_uintptr_t);
@@ -486,7 +534,7 @@ void process_write(binder_write_read *bwr) {
 }
 
 void process_read(binder_write_read *bwr) {
-    if (!bwr || !bwr->read_buffer || !bwr->read_consumed) return;
+    if (!bwr || !bwr->read_buffer || !bwr->read_consumed || bwr->read_consumed > bwr->read_size) return;
     auto *ptr = reinterpret_cast<uint8_t *>(bwr->read_buffer);
     auto *end = ptr + bwr->read_consumed;
 
@@ -529,10 +577,13 @@ void process_read(binder_write_read *bwr) {
 
 jboolean hook_transact_native(JNIEnv *env, jobject thiz, jint code, jobject data_obj, jobject reply_obj,
                               jint flags) {
+    (void)thiz;
     if (!g_original_transact_native) return JNI_FALSE;
 
+    const bool is_list = code == kSvcListServices || code == kSvcListServicesLegacy;
+    const bool is_debug = code == kSvcGetServiceDebugInfo || code == kSvcGetServiceDebugInfoLegacy;
     bool is_service_manager = false;
-    if (data_obj != nullptr && init_parcel_methods(env)) {
+    if ((is_list || is_debug) && data_obj != nullptr && init_parcel_methods(env)) {
         // Only use the request to identify IServiceManager.  Rewriting a
         // direct getService/checkService name to force a null result can
         // crash framework code during application initialization.
@@ -547,8 +598,6 @@ jboolean hook_transact_native(JNIEnv *env, jobject thiz, jint code, jobject data
     }
 
     if (!init_parcel_methods(env)) return result;
-    const bool is_list = code == kSvcListServices || code == kSvcListServicesLegacy;
-    const bool is_debug = code == kSvcGetServiceDebugInfo || code == kSvcGetServiceDebugInfoLegacy;
     if (is_list) {
         filter_list_reply(env, reply_obj);
     } else if (is_debug) {
