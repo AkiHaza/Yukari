@@ -9,13 +9,13 @@
 | 检查项 | 结论 | 处理 |
 | --- | --- | --- |
 | Binder 直接 lookup 误伤 | 安全（已修复） | JNI/ioctl 路径均不改写 `getService`/`checkService` 请求 |
-| `sCache` 清理时机 | 基本安全 | 保留启动后清理；枚举/调试回复后再次清理，异常自动清除 |
+| `sCache` 清理时机 | 基本安全 | 仅在启动后清理，避免事务回调并发修改 `ArrayMap`；JNI 异常均自动清除 |
 | `FORCE_DENYLIST_UNMOUNT` | 已缓解（仍需设备验证） | 仅目标进程启用；新增 `force_denylist_unmount` 配置开关，默认 `true`，兼容性问题可关闭 |
 | 等长 String16 替换 | 安全 | 所有 offset/长度/对齐均做边界检查；过大或 malformed Parcel 跳过 |
 | ioctl 回复缓冲释放 | 已修复 | `BC_FREE_BUFFER` 转发原始驱动指针，避免每次过滤泄漏 Binder 映射 |
 | JNI Parcel 回复重写 | 安全（防御式） | 保留 `readException` 头、数组计数和 `ServiceDebugInfo.debugPid` |
 | protected package | 已加强 | 增加权限、Provider、电话、蓝牙、NFC、输入法等启动关键组件 |
-| 非目标生命周期 | 安全 | 仅非目标调用 `DLCLOSE_MODULE_LIBRARY`；目标不卸载已安装 Hook |
+| 非目标生命周期 | 安全 | 非目标应用和 `system_server` 调用 `DLCLOSE_MODULE_LIBRARY`；目标不卸载已安装 Hook |
 | 模块脚本/配置原子性 | 已修复 | 同目录临时文件、校验、chmod 后原子 `mv`，失败保留旧配置 |
 
 ## 1. Binder 请求过滤误伤
@@ -41,7 +41,7 @@
 - 对 `FindClass`、字段/方法查找、Java 调用逐步检查异常；
 - 使用 `keySet().toArray()` 后再删除，避免迭代期间修改 Map；
 - 释放所有 LocalRef；
-- 枚举/调试回复过滤完成后再次执行，降低重新缓存导致的可见窗口。
+- 仅在 `postAppSpecialize` 执行一次；不在 Binder 事务回调中并发修改 `ArrayMap`。
 
 不会把 `sCache` 置 null，也不会阻止框架初始化；删除的仅是匹配 ROM 关键字的条目。
 
@@ -148,6 +148,28 @@ readelf -Ws /tmp/yukari.so
 adb shell 'cat /proc/$(pidof <target>)/maps | grep -E "yukari|rwxp"'
 ```
 
+### Transaction compatibility note
+
+`IServiceManager` transaction IDs are not constant across all Android releases. The
+implementation reads `Build.VERSION.SDK_INT` and uses list/debug slots `4/12`,
+`4/13`, `4/14` on Android 12/13/14, and `6/16` on the newer AIDL layout (Android
+16 and later). Android 11 and earlier do not enable debug-info filtering in the
+ioctl fallback because transaction 10 is a different operation on those builds.
+
 JNI 主路径下 `ioctl` GOT 应保持原始 libbinder 地址；仅启用旧系统回退时，使用
 `dladdr` 检查 GOT 槽落在匿名 `r-xp` 跳板映射。由于回调代码仍驻留模块库，当前方案
 不会宣称 `/proc/self/maps` 完全无模块路径；这是在低崩溃风险和跨版本兼容性下的明确取舍。
+
+`clear_cache()` 只在 `postAppSpecialize` 执行一次。事务回调不再并发修改
+`ServiceManager.sCache`：AOSP 的 `getService()` 对 miss 不会回填该 Map，重复清理的
+收益有限，反而可能与应用线程的 `ArrayMap` 读取产生竞态。若厂商 ROM 明确会动态回填，
+应优先实现受锁保护的代理 Map，并在该 ROM 上单独回归。
+
+`preServerSpecialize` 现在对 `system_server` 设置 `DLCLOSE_MODULE_LIBRARY`。该进程不
+安装任何 hook，因此卸载不会留下悬空回调，也能减少非目标进程的模块映射。
+
+安装脚本的旧配置备份现在写入 Magisk 提供的 `MODPATH`，不依赖 recovery 是否导出
+`TMPDIR`；备份失败时不会假报“已保留”，避免升级后误覆盖用户配置。
+
+JNI/native 可选路径对初始化、Parcel 字符串和回退安装增加了异常兜底；资源不足时过滤
+会降级为不安装回退 hook，而不会让 C++ 异常穿过 JNI 边界终止目标应用。

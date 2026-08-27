@@ -21,10 +21,18 @@ bool g_enabled_for_process = false;
 std::string jstr_to_str(JNIEnv *env, jstring value) {
     if (!env || !value) return {};
     const char *raw = env->GetStringUTFChars(value, nullptr);
-    if (!raw) return {};
-    std::string out = raw;
-    env->ReleaseStringUTFChars(value, raw);
-    return out;
+    if (!raw) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return {};
+    }
+    try {
+        std::string out = raw;
+        env->ReleaseStringUTFChars(value, raw);
+        return out;
+    } catch (...) {
+        env->ReleaseStringUTFChars(value, raw);
+        return {};
+    }
 }
 } // namespace
 
@@ -38,7 +46,16 @@ public:
             log_error("configuration allocation failed; module disabled");
             return;
         }
-        load_config(*g_config);
+        try {
+            load_config(*g_config);
+        } catch (...) {
+            // Treat a transient allocation/parser failure as an invalid
+            // configuration. The module then fails closed for this process.
+            g_config->enabled = false;
+            g_config->force_denylist_unmount = true;
+            g_config->targets.clear();
+            log_error("configuration load failed; module disabled");
+        }
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
@@ -67,19 +84,41 @@ public:
         // The Zygisk API is guaranteed to be live in preAppSpecialize.  Hook
         // the boot-class native method here, before post-specialization API
         // calls become implementation-defined.
-        g_jni_hook_ready_ = install_jni_hook(env_, api_);
+        try {
+            g_jni_hook_ready_ = install_jni_hook(env_, api_);
+        } catch (...) {
+            g_jni_hook_ready_ = false;
+            log_error("JNI hook setup failed; will try ioctl fallback");
+        }
         log_info("matched target %s", g_package_name.data());
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *) override {
         if (!g_enabled_for_process) return;
-        clear_cache(env_);
-        // BinderProxy JNI interception leaves libbinder GOT/PLT untouched.
-        // Old releases without the stable JNI entry point use the existing
-        // ioctl path, whose callback is now reached through an anonymous RX
-        // trampoline.
-        if (!g_jni_hook_ready_) install_hooks(api_);
+        try {
+            clear_cache(env_);
+        } catch (...) {
+            log_error("cache cleanup failed; continuing with binder instrumentation");
+        }
+        try {
+            // BinderProxy JNI interception leaves libbinder GOT/PLT untouched.
+            // Old releases without the stable JNI entry point use the existing
+            // ioctl path, whose callback is now reached through an anonymous RX
+            // trampoline.
+            if (!g_jni_hook_ready_) install_hooks(api_);
+        } catch (...) {
+            // Filtering is best-effort. Never let an allocation failure in
+            // optional instrumentation abort application startup.
+            log_error("fallback hook setup failed; continuing without fallback");
+        }
         log_info("enabled for %s", g_package_name.data());
+    }
+
+    void preServerSpecialize(zygisk::ServerSpecializeArgs *) override {
+        // Yukari is app-scoped. Do not leave the module resident in
+        // system_server, where no filtering is needed and a native mapping
+        // would only add observable surface.
+        if (api_) api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
     }
 
 private:

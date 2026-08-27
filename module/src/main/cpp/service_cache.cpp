@@ -87,9 +87,14 @@ void clear_cache(JNIEnv *env) {
         if (!key) continue;
         const char *raw = env->GetStringUTFChars(key, nullptr);
         if (raw) {
-            if (hide_service(std::string(raw))) {
-                env->CallObjectMethod(cache, remove, key);
-                if (env->ExceptionCheck()) env->ExceptionClear();
+            try {
+                if (hide_service(std::string(raw))) {
+                    env->CallObjectMethod(cache, remove, key);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+            } catch (...) {
+                // A transient native allocation failure must not escape JNI
+                // and turn optional cache cleanup into an app crash.
             }
             env->ReleaseStringUTFChars(key, raw);
         }

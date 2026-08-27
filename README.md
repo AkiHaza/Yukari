@@ -15,6 +15,12 @@ so libbinder PLT/GOT relocations are not modified. `listServices` and
 the stable JNI entry point use the legacy ioctl filter as a fallback; its PLT
 replacement points at an anonymous RX trampoline.
 
+The Binder transaction numbers are selected from `Build.VERSION.SDK_INT`:
+Android 12/13/14 use the corresponding `getServiceDebugInfo` slots (12/13/14),
+while the newer AIDL layout uses list slot 6 and debug slot 16. Android 11 and
+older do not enable debug-info filtering in the ioctl fallback because slot 10
+is a different operation there.
+
 Private ELF symbols are hidden with a linker version script and stripped from
 release artifacts. The module mapping can still be visible in `/proc/self/maps`
 because the JNI callback must remain resident; unloading it safely would

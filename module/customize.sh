@@ -6,7 +6,10 @@ ui_print " Yukari Guard Installer"
 ui_print "==============================="
 
 OLD_CONFIG="/data/adb/modules/Yukari/config.json"
-BACKUP_CONFIG="$TMPDIR/yukari_config_backup.json"
+# MODPATH is supplied by Magisk and is writable throughout installation;
+# keeping the backup beside the staged module avoids relying on TMPDIR being
+# exported by a recovery shell.
+BACKUP_CONFIG="$MODPATH/.yukari_config_backup.$$"
 KEEP_CONFIG=0
 
 # Check for previous installation
@@ -44,8 +47,12 @@ if [ -f "$OLD_CONFIG" ]; then
     case $KEY_RESULT in
         1)
             KEEP_CONFIG=1
-            cp "$OLD_CONFIG" "$BACKUP_CONFIG"
-            ui_print "- Config will be preserved"
+            if cp "$OLD_CONFIG" "$BACKUP_CONFIG"; then
+                ui_print "- Config will be preserved"
+            else
+                KEEP_CONFIG=0
+                ui_print "- Could not back up config; using packaged defaults"
+            fi
             ;;
         2|*)
             ui_print "- Config will not be preserved"
