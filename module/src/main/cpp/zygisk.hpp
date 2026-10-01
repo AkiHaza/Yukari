@@ -166,7 +166,11 @@ inline bool Api::exemptFd(int fd) {
 
 inline void Api::hookJniNativeMethods(JNIEnv *env, const char *className, JNINativeMethod *methods,
                                       int numMethods) {
-    if (tbl->hookJniNativeMethods) tbl->hookJniNativeMethods(env, className, methods, numMethods);
+    if (tbl->hookJniNativeMethods) {
+        tbl->hookJniNativeMethods(env, className, methods, numMethods);
+    } else {
+        for (int index = 0; index < numMethods; ++index) methods[index].fnPtr = nullptr;
+    }
 }
 
 inline void Api::pltHookRegister(dev_t dev, ino_t inode, const char *symbol, void *newFunc, void **oldFunc) {

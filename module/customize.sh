@@ -50,8 +50,7 @@ if [ -f "$OLD_CONFIG" ]; then
             if cp "$OLD_CONFIG" "$BACKUP_CONFIG"; then
                 ui_print "- Config will be preserved"
             else
-                KEEP_CONFIG=0
-                ui_print "- Could not back up config; using packaged defaults"
+                abort "- Could not back up config; installation stopped to preserve it"
             fi
             ;;
         2|*)
@@ -64,8 +63,9 @@ fi
 
 # Restore config if user chose to keep
 if [ "$KEEP_CONFIG" -eq 1 ] && [ -f "$BACKUP_CONFIG" ]; then
-    cp "$BACKUP_CONFIG" "$MODPATH/config.json"
-    rm -f "$BACKUP_CONFIG"
+    if ! chmod 0644 "$BACKUP_CONFIG" || ! mv -f "$BACKUP_CONFIG" "$MODPATH/config.json"; then
+        abort "- Could not restore config; installation stopped"
+    fi
     ui_print "- Previous config restored"
 fi
 

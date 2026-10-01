@@ -6,8 +6,8 @@ ServiceManager 服务信号。固定匹配关键字为 `lineage`、`crdroid`、`
 
 ## 实现策略
 
-目标进程在 `postAppSpecialize` 阶段先清理 `ServiceManager.sCache`，随后优先
-安装 `android.os.BinderProxy.transactNative` 的 JNI hook。该路径在 Parcel
+目标进程在 `preAppSpecialize` 注册 `android.os.BinderProxy.transactNative`
+的 JNI hook，并在 `postAppSpecialize` 清理一次 `ServiceManager.sCache`。该路径在 Parcel
 层完成过滤，不改写 `libbinder.so` 的 PLT/GOT：
 
 - 不改写 `getService`/`checkService` 请求（避免框架初始化因 null Binder 崩溃）；
@@ -41,11 +41,18 @@ GOT 槽直接指向模块 `.text`。
 ```json
 {
   "enabled": true,
+  "force_denylist_unmount": true,
   "targets": ["com.example.app"]
 }
 ```
 
 仅列出的应用进程会启用过滤，系统进程和受保护包始终跳过。
+如果目标应用依赖 Magisk 挂载的文件或资源，可将 `force_denylist_unmount` 设为
+`false`；服务过滤仍然生效。
+
+运行模块 action 可通过序号合并或替换 targets，`a` 为全选合并、`k` 保留、`q` 取消。
+Magisk 管理器没有终端时，音量上键全选合并、音量下键进入逐包选择；超时保持原文件。
+脚本验证三个已知配置字段；未知字段或不支持的 JSON 转义会中止写入并保留原配置。
 
 ## 分阶段验证
 
@@ -58,8 +65,11 @@ GOT 槽直接指向模块 `.text`。
 
 1. **构建检查**
 
+   本地需要 JDK 17、Gradle 8.11.1 和 Android SDK/NDK。仓库的 `gradlew` 是调用
+   `PATH` 中 Gradle 的入口；CI 使用 `setup-gradle` 安装固定版本。
+
    ```bash
-   gradle :module:assembleRelease
+   ./gradlew :module:assembleRelease
    bash scripts/package.sh
    ```
 

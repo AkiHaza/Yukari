@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dlfcn.h>
 #include <linux/android/binder.h>
 #include <pthread.h>
 #include <string>
@@ -45,20 +46,15 @@ bool g_jni_hook_installed = false;
 
 constexpr const char *kIServiceManagerDescriptor = "android.os.IServiceManager";
 
-// BinderProxy's native method is stable since API 26. Transaction numbers are
-// part of IServiceManager.aidl and changed as methods were appended. The
-// interface token check prevents matching unrelated Binder interfaces that
-// happen to use the same code.
-constexpr jint kSvcListServicesLegacy = 4;
-constexpr jint kSvcListServices = 6;
-// getServiceDebugInfo was appended to IServiceManager at different points
-// on Android 12-14, then shifted again on the newer AIDL interface. Select the
-// transaction number from SDK_INT below instead of treating every
-// ServiceManager transaction as a debug reply.
+// BinderProxy's native method is stable since API 26. IServiceManager.aidl
+// keeps listServices at transaction 4; getServiceDebugInfo moved as methods
+// were appended. The interface token check also gates these transaction IDs.
+constexpr jint kSvcListServices = 4;
+// getServiceDebugInfo moved on Android 12-14 and remains at transaction 14
+// on Android 15-16. Select its transaction number from SDK_INT below.
 constexpr jint kSvcGetServiceDebugInfoAndroid12 = 12;
 constexpr jint kSvcGetServiceDebugInfoAndroid13 = 13;
 constexpr jint kSvcGetServiceDebugInfoAndroid14 = 14;
-constexpr jint kSvcGetServiceDebugInfo = 16;
 
 // Binder command buffers are bounded by the kernel's transaction limit.  Keep
 // a conservative userspace ceiling before doing pointer arithmetic on data
@@ -67,14 +63,12 @@ constexpr binder_size_t kMaxCommandBytes = 4u * 1024u * 1024u;
 
 struct ParcelMethods {
     jclass cls = nullptr;
+    jmethodID data_size = nullptr;
     jmethodID data_position = nullptr;
     jmethodID set_data_position = nullptr;
     jmethodID read_string = nullptr;
     jmethodID write_string = nullptr;
     jmethodID read_int = nullptr;
-    jmethodID write_int = nullptr;
-    jmethodID create_string_array = nullptr;
-    jmethodID write_string_array = nullptr;
 };
 
 ParcelMethods g_parcel_methods;
@@ -94,6 +88,7 @@ thread_local unsigned char *g_swap_buf = nullptr; // Allocated on first use
 // pthread_key destructor: automatically frees the buffer when thread exits
 pthread_key_t g_buf_key;
 pthread_once_t g_buf_key_once = PTHREAD_ONCE_INIT;
+bool g_buf_key_ready = false;
 
 void buf_destructor(void *buf) {
     if (buf) {
@@ -102,18 +97,21 @@ void buf_destructor(void *buf) {
 }
 
 void buf_key_init() {
-    pthread_key_create(&g_buf_key, buf_destructor);
+    g_buf_key_ready = pthread_key_create(&g_buf_key, buf_destructor) == 0;
 }
 
 // Returns a thread-local buffer, allocating it if necessary.
 // Registered with pthread_key so it's freed on thread exit.
 unsigned char *get_swap_buf() {
     if (!g_swap_buf) {
-        pthread_once(&g_buf_key_once, buf_key_init);
-        g_swap_buf = static_cast<unsigned char *>(malloc(MAX_REPLY_BUF));
-        if (g_swap_buf) {
-            pthread_setspecific(g_buf_key, g_swap_buf);
+        if (pthread_once(&g_buf_key_once, buf_key_init) != 0 || !g_buf_key_ready) return nullptr;
+        auto *buffer = static_cast<unsigned char *>(malloc(MAX_REPLY_BUF));
+        if (!buffer) return nullptr;
+        if (pthread_setspecific(g_buf_key, buffer) != 0) {
+            free(buffer);
+            return nullptr;
         }
+        g_swap_buf = buffer;
     }
     return g_swap_buf;
 }
@@ -124,6 +122,12 @@ thread_local void *g_active_swap_ptr = nullptr;
 // while the userspace replacement is visible to Java, then restore it in the
 // BC_FREE_BUFFER command sent back to the driver.
 thread_local binder_uintptr_t g_original_reply_ptr = 0;
+
+struct FreeBufferPatch {
+    uint8_t *slot = nullptr;
+    binder_size_t consumed_end = 0;
+    binder_uintptr_t swap_pointer = 0;
+};
 
 struct binder_transaction_data_sg_local {
     binder_transaction_data transaction_data;
@@ -140,6 +144,16 @@ size_t align8(size_t value) { return (value + 7u) & ~static_cast<size_t>(7u); }
 
 void clear_jni_exception(JNIEnv *env) {
     if (env && env->ExceptionCheck()) env->ExceptionClear();
+}
+
+bool reset_reply_position(JNIEnv *env, jobject parcel) {
+    clear_jni_exception(env);
+    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
 }
 
 jint sdk_int(JNIEnv *env) {
@@ -169,17 +183,12 @@ jint sdk_int(JNIEnv *env) {
 }
 
 bool is_list_transaction(JNIEnv *env, jint code) {
-    const jint sdk = sdk_int(env);
-    if (sdk >= 36) return code == kSvcListServices;
-    if (sdk >= 0) return code == kSvcListServicesLegacy;
-    // Keep the pre-AIDL-extension value for unusual vendor runtimes where
-    // Build.VERSION is unavailable. The descriptor check still gates it.
-    return code == kSvcListServicesLegacy;
+    (void)env;
+    return code == kSvcListServices;
 }
 
 bool is_debug_transaction(JNIEnv *env, jint code) {
     const jint sdk = sdk_int(env);
-    if (sdk >= 36) return code == kSvcGetServiceDebugInfo;
     if (sdk >= 34) return code == kSvcGetServiceDebugInfoAndroid14;
     if (sdk >= 33) return code == kSvcGetServiceDebugInfoAndroid13;
     if (sdk >= 31) return code == kSvcGetServiceDebugInfoAndroid12;
@@ -215,17 +224,19 @@ bool init_parcel_methods(JNIEnv *env) {
         return false;
     }
 
-    methods.data_position = env->GetMethodID(methods.cls, "dataPosition", "()I");
-    methods.set_data_position = env->GetMethodID(methods.cls, "setDataPosition", "(I)V");
-    methods.read_string = env->GetMethodID(methods.cls, "readString", "()Ljava/lang/String;");
-    methods.write_string = env->GetMethodID(methods.cls, "writeString", "(Ljava/lang/String;)V");
-    methods.read_int = env->GetMethodID(methods.cls, "readInt", "()I");
-    methods.write_int = env->GetMethodID(methods.cls, "writeInt", "(I)V");
-    methods.create_string_array = env->GetMethodID(methods.cls, "createStringArray", "()[Ljava/lang/String;");
-    methods.write_string_array = env->GetMethodID(methods.cls, "writeStringArray", "([Ljava/lang/String;)V");
-    if (env->ExceptionCheck() || !methods.data_position ||
+    const auto find_method = [&](const char *name, const char *signature) -> jmethodID {
+        if (env->ExceptionCheck()) return nullptr;
+        return env->GetMethodID(methods.cls, name, signature);
+    };
+    methods.data_size = find_method("dataSize", "()I");
+    methods.data_position = find_method("dataPosition", "()I");
+    methods.set_data_position = find_method("setDataPosition", "(I)V");
+    methods.read_string = find_method("readString", "()Ljava/lang/String;");
+    methods.write_string = find_method("writeString", "(Ljava/lang/String;)V");
+    methods.read_int = find_method("readInt", "()I");
+    if (env->ExceptionCheck() || !methods.data_size || !methods.data_position ||
         !methods.set_data_position || !methods.read_string || !methods.write_string ||
-        !methods.read_int || !methods.write_int || !methods.create_string_array || !methods.write_string_array) {
+        !methods.read_int) {
         clear_jni_exception(env);
         env->DeleteGlobalRef(methods.cls);
         pthread_mutex_unlock(&g_parcel_mutex);
@@ -241,7 +252,7 @@ bool init_parcel_methods(JNIEnv *env) {
 std::string jstring_ascii(JNIEnv *env, jstring value) {
     if (!env || !value) return {};
     const jsize length = env->GetStringLength(value);
-    if (length <= 0 || length > 512) return {};
+    if (env->ExceptionCheck() || length <= 0 || length > 512) return {};
     const jchar *chars = env->GetStringChars(value, nullptr);
     if (!chars) return {};
     try {
@@ -262,7 +273,7 @@ std::string jstring_ascii(JNIEnv *env, jstring value) {
 jstring replacement_for(JNIEnv *env, jstring value) {
     if (!env || !value) return nullptr;
     const jsize length = env->GetStringLength(value);
-    if (length <= 0 || length > 512) return nullptr;
+    if (env->ExceptionCheck() || length <= 0 || length > 512) return nullptr;
     try {
         std::u16string replacement(static_cast<size_t>(length), u'_');
         return env->NewString(reinterpret_cast<const jchar *>(replacement.data()), length);
@@ -278,19 +289,34 @@ bool parcel_has_service_manager(JNIEnv *env, jobject parcel) {
         clear_jni_exception(env);
         return false;
     }
+    const jint size = env->CallIntMethod(parcel, g_parcel_methods.data_size);
+    if (env->ExceptionCheck()) {
+        clear_jni_exception(env);
+        return false;
+    }
     // writeInterfaceToken prepends a kernel request header.  Its size changed
     // across releases: one int (O/P), two ints (Q), three ints (R), and four
     // ints on newer builds.  RPC parcels have no header and use offset zero.
     constexpr jint kCandidateOffsets[] = {0, 4, 8, 12, 16};
     for (jint offset : kCandidateOffsets) {
+        if (offset > size - static_cast<jint>(sizeof(jint))) continue;
         env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, offset);
+        if (env->ExceptionCheck()) {
+            clear_jni_exception(env);
+            break;
+        }
         jstring descriptor = static_cast<jstring>(env->CallObjectMethod(parcel, g_parcel_methods.read_string));
         if (env->ExceptionCheck()) {
+            if (descriptor) env->DeleteLocalRef(descriptor);
             clear_jni_exception(env);
             continue;
         }
         const std::string value = jstring_ascii(env, descriptor);
         if (descriptor) env->DeleteLocalRef(descriptor);
+        if (env->ExceptionCheck()) {
+            clear_jni_exception(env);
+            break;
+        }
         if (value == kIServiceManagerDescriptor) {
             env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, original_position);
             clear_jni_exception(env);
@@ -302,115 +328,101 @@ bool parcel_has_service_manager(JNIEnv *env, jobject parcel) {
     return false;
 }
 
-void filter_list_reply(JNIEnv *env, jobject parcel) {
-    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-    const jint exception = env->CallIntMethod(parcel, g_parcel_methods.read_int);
-    if (env->ExceptionCheck() || exception != 0) {
-        clear_jni_exception(env);
-        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-        clear_jni_exception(env);
-        return;
+bool filter_reply_string(JNIEnv *env, jobject parcel, jint limit) {
+    const jint start = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+    if (env->ExceptionCheck() || start < 0 || start > limit - 4) return false;
+    auto name = static_cast<jstring>(env->CallObjectMethod(parcel, g_parcel_methods.read_string));
+    if (env->ExceptionCheck()) {
+        if (name) env->DeleteLocalRef(name);
+        return false;
     }
-    auto values = static_cast<jobjectArray>(env->CallObjectMethod(parcel, g_parcel_methods.create_string_array));
-    if (env->ExceptionCheck() || !values) {
-        clear_jni_exception(env);
-        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-        clear_jni_exception(env);
-        return;
+    const jint end = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+    if (env->ExceptionCheck() || end < start + 4 || end > limit) {
+        if (name) env->DeleteLocalRef(name);
+        return false;
     }
-    const jsize count = env->GetArrayLength(values);
-    bool changed = false;
-    for (jsize i = 0; i < count; ++i) {
-        auto value = static_cast<jstring>(env->GetObjectArrayElement(values, i));
-        const std::string service = jstring_ascii(env, value);
-        if (value && !service.empty() && hide_service(service)) {
-            jstring replacement = replacement_for(env, value);
-            if (replacement) {
-                env->SetObjectArrayElement(values, i, replacement);
-                changed = true;
-                env->DeleteLocalRef(replacement);
+    if (!name) return true;
+    const std::string service = jstring_ascii(env, name);
+    if (!env->ExceptionCheck() && !service.empty() && hide_service(service)) {
+        jstring replacement = replacement_for(env, name);
+        if (replacement && !env->ExceptionCheck()) {
+            env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, start);
+            if (!env->ExceptionCheck()) {
+                env->CallVoidMethod(parcel, g_parcel_methods.write_string, replacement);
+            }
+            if (!env->ExceptionCheck()) {
+                env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, end);
             }
         }
-        if (value) env->DeleteLocalRef(value);
+        if (replacement) env->DeleteLocalRef(replacement);
     }
-    if (!changed) {
-        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-        clear_jni_exception(env);
-        env->DeleteLocalRef(values);
-        return;
-    }
-    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-    env->CallVoidMethod(parcel, g_parcel_methods.write_int, exception);
-    env->CallVoidMethod(parcel, g_parcel_methods.write_string_array, values);
-    // BinderProxy returns reply Parcels positioned at zero.  Leave the
-    // rewritten Parcel in the same state so the generated IServiceManager
-    // proxy can call readException()/createStringArray() normally.
-    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-    clear_jni_exception(env);
-    env->DeleteLocalRef(values);
+    env->DeleteLocalRef(name);
+    return !env->ExceptionCheck();
 }
 
-void filter_debug_info_reply(JNIEnv *env, jobject parcel) {
-    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
+void filter_list_reply(JNIEnv *env, jobject parcel) {
+    if (!reset_reply_position(env, parcel)) return;
+    const jint size = env->CallIntMethod(parcel, g_parcel_methods.data_size);
+    if (env->ExceptionCheck() || size < 8 || size > MAX_REPLY_BUF) {
+        reset_reply_position(env, parcel);
+        return;
+    }
+    const jint sdk = g_sdk_int.load(std::memory_order_acquire);
+    if (sdk >= 26 && sdk <= 28) {
+        filter_reply_string(env, parcel, size);
+        reset_reply_position(env, parcel);
+        return;
+    }
     const jint exception = env->CallIntMethod(parcel, g_parcel_methods.read_int);
     if (env->ExceptionCheck() || exception != 0) {
-        clear_jni_exception(env);
-        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-        clear_jni_exception(env);
+        reset_reply_position(env, parcel);
         return;
     }
     const jint count = env->CallIntMethod(parcel, g_parcel_methods.read_int);
-    if (env->ExceptionCheck() || count < 0 || count > 4096) {
-        clear_jni_exception(env);
-        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-        clear_jni_exception(env);
+    if (!env->ExceptionCheck() && count >= 0 && count <= (size - 8) / 4) {
+        for (jint index = 0; index < count; ++index) {
+            if (!filter_reply_string(env, parcel, size)) break;
+        }
+    }
+    reset_reply_position(env, parcel);
+}
+
+void filter_debug_info_reply(JNIEnv *env, jobject parcel) {
+    if (!reset_reply_position(env, parcel)) return;
+    const jint size = env->CallIntMethod(parcel, g_parcel_methods.data_size);
+    if (env->ExceptionCheck() || size < 8 || size > MAX_REPLY_BUF) {
+        reset_reply_position(env, parcel);
         return;
     }
-    bool changed = false;
-    for (jint i = 0; i < count; ++i) {
+    const jint exception = env->CallIntMethod(parcel, g_parcel_methods.read_int);
+    if (env->ExceptionCheck() || exception != 0) {
+        reset_reply_position(env, parcel);
+        return;
+    }
+    const jint count = env->CallIntMethod(parcel, g_parcel_methods.read_int);
+    if (env->ExceptionCheck() || count < 0 || count > (size - 8) / 4) {
+        reset_reply_position(env, parcel);
+        return;
+    }
+    for (jint index = 0; index < count; ++index) {
+        const jint position = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+        if (env->ExceptionCheck() || position < 0 || position > size - 4) break;
         const jint present = env->CallIntMethod(parcel, g_parcel_methods.read_int);
+        if (env->ExceptionCheck()) break;
         if (present == 0) continue;
-        if (present != 1 || env->ExceptionCheck()) {
-            clear_jni_exception(env);
-            break;
-        }
-        const jint start = env->CallIntMethod(parcel, g_parcel_methods.data_position);
-        auto name = static_cast<jstring>(env->CallObjectMethod(parcel, g_parcel_methods.read_string));
-        if (env->ExceptionCheck() || !name) {
-            clear_jni_exception(env);
-            break;
-        }
-        const jint end = env->CallIntMethod(parcel, g_parcel_methods.data_position);
-        const std::string service = jstring_ascii(env, name);
-        if (!service.empty() && hide_service(service)) {
-            jstring replacement = replacement_for(env, name);
-            if (replacement) {
-                env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, start);
-                env->CallVoidMethod(parcel, g_parcel_methods.write_string, replacement);
-                env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, end);
-                changed = true;
-                env->DeleteLocalRef(replacement);
-            }
-        }
-        env->DeleteLocalRef(name);
-        // ServiceDebugInfo contains one debugPid int after the name.
+        if (present != 1) break;
+        const jint object_start = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+        if (env->ExceptionCheck() || object_start < 0 || object_start > size - 4) break;
+        const jint object_size = env->CallIntMethod(parcel, g_parcel_methods.read_int);
+        if (env->ExceptionCheck() || object_size < 12 || object_size > size - object_start) break;
+        const jint object_end = object_start + object_size;
+        if (!filter_reply_string(env, parcel, object_end - 4)) break;
         (void)env->CallIntMethod(parcel, g_parcel_methods.read_int);
-        if (env->ExceptionCheck()) {
-            clear_jni_exception(env);
-            break;
-        }
+        if (env->ExceptionCheck()) break;
+        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, object_end);
+        if (env->ExceptionCheck()) break;
     }
-    if (!changed) {
-        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-        clear_jni_exception(env);
-        return;
-    }
-    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-    env->CallVoidMethod(parcel, g_parcel_methods.write_int, exception);
-    // The parser only changes String16 payloads in place; no need to rewrite
-    // the count or the surrounding parcel data.
-    env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, 0);
-    clear_jni_exception(env);
+    reset_reply_position(env, parcel);
 }
 
 jboolean hook_transact_native(JNIEnv *env, jobject thiz, jint code, jobject data_obj, jobject reply_obj,
@@ -507,14 +519,11 @@ void process_transaction(const binder_transaction_data &txn) {
     // Enumeration/debug replies are scrubbed below, which is the stable and
     // low-risk observation boundary.
     // The ioctl fallback uses the SDK value captured while the hook is
-    // installed. Keep the same version mapping as the JNI path; in the
-    // unlikely event that SDK_INT cannot be read, filter listServices only.
+    // installed. If SDK_INT cannot be read, filter listServices only.
     const jint sdk = g_sdk_int.load(std::memory_order_acquire);
-    const bool is_list = (sdk >= 36) ? txn.code == static_cast<uint32_t>(kSvcListServices)
-                                    : txn.code == static_cast<uint32_t>(kSvcListServicesLegacy);
+    const bool is_list = txn.code == static_cast<uint32_t>(kSvcListServices);
     bool is_debug = false;
-    if (sdk >= 36) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfo);
-    else if (sdk >= 34) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid14);
+    if (sdk >= 34) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid14);
     else if (sdk >= 33) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid13);
     else if (sdk >= 31) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid12);
     g_pending_sm_reply = is_list || is_debug;
@@ -589,38 +598,40 @@ void process_reply(binder_transaction_data *txn) {
     swap_reply_buffer(txn);
 }
 
-void process_write(binder_write_read *bwr) {
+void process_write(binder_write_read *bwr, FreeBufferPatch &patch) {
     if (!bwr || !bwr->write_buffer || !bwr->write_size) return;
-    if (bwr->write_size > kMaxCommandBytes) return;
-    auto *ptr = reinterpret_cast<uint8_t *>(bwr->write_buffer);
-    auto *end = ptr + bwr->write_size;
+    if (bwr->write_size > kMaxCommandBytes || bwr->write_consumed > bwr->write_size) return;
+    auto *begin = reinterpret_cast<uint8_t *>(bwr->write_buffer);
+    auto *ptr = begin + bwr->write_consumed;
+    auto *end = begin + bwr->write_size;
 
-    while (ptr + sizeof(uint32_t) <= end) {
+    while (static_cast<size_t>(end - ptr) >= sizeof(uint32_t)) {
         uint32_t cmd = 0;
         std::memcpy(&cmd, ptr, sizeof(cmd));
         ptr += sizeof(cmd);
 
         if (cmd == BC_TRANSACTION || cmd == BC_REPLY) {
-            if (ptr + sizeof(binder_transaction_data) > end) return;
-            auto *txn = reinterpret_cast<binder_transaction_data *>(ptr);
-            if (cmd == BC_TRANSACTION) process_transaction(*txn);
+            if (static_cast<size_t>(end - ptr) < sizeof(binder_transaction_data)) return;
+            binder_transaction_data txn{};
+            std::memcpy(&txn, ptr, sizeof(txn));
+            if (cmd == BC_TRANSACTION) process_transaction(txn);
             ptr += sizeof(binder_transaction_data);
         } else if (cmd == BC_TRANSACTION_SG) {
-            if (ptr + sizeof(binder_transaction_data_sg_local) > end) return;
-            auto *txn = reinterpret_cast<binder_transaction_data_sg_local *>(ptr);
-            process_transaction(txn->transaction_data);
+            if (static_cast<size_t>(end - ptr) < sizeof(binder_transaction_data_sg_local)) return;
+            binder_transaction_data_sg_local txn{};
+            std::memcpy(&txn, ptr, sizeof(txn));
+            process_transaction(txn.transaction_data);
             ptr += sizeof(binder_transaction_data_sg_local);
         } else if (cmd == BC_FREE_BUFFER) {
-            if (ptr + sizeof(binder_uintptr_t) > end) return;
-            binder_uintptr_t *buf_ptr = reinterpret_cast<binder_uintptr_t *>(ptr);
+            if (static_cast<size_t>(end - ptr) < sizeof(binder_uintptr_t)) return;
+            binder_uintptr_t buffer_pointer = 0;
+            std::memcpy(&buffer_pointer, ptr, sizeof(buffer_pointer));
             if (g_active_swap_ptr != nullptr &&
-                *buf_ptr == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
-                g_active_swap_ptr = nullptr;
-                // Pass the original mmap pointer to the binder driver so it
-                // can release the transaction buffer.  Supplying zero here
-                // leaks one kernel buffer per filtered reply.
-                *buf_ptr = g_original_reply_ptr;
-                g_original_reply_ptr = 0;
+                buffer_pointer == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
+                patch.slot = ptr;
+                patch.consumed_end = static_cast<binder_size_t>(ptr + sizeof(buffer_pointer) - begin);
+                patch.swap_pointer = buffer_pointer;
+                std::memcpy(ptr, &g_original_reply_ptr, sizeof(g_original_reply_ptr));
                 log_info("swap: intercepted BC_FREE_BUFFER for swap buffer");
             }
             ptr += sizeof(binder_uintptr_t);
@@ -636,21 +647,23 @@ void process_read(binder_write_read *bwr) {
     auto *ptr = reinterpret_cast<uint8_t *>(bwr->read_buffer);
     auto *end = ptr + bwr->read_consumed;
 
-    while (ptr + sizeof(uint32_t) <= end) {
+    while (static_cast<size_t>(end - ptr) >= sizeof(uint32_t)) {
         uint32_t cmd = 0;
         std::memcpy(&cmd, ptr, sizeof(cmd));
         ptr += sizeof(cmd);
 
         switch (cmd) {
             case BR_REPLY: {
-                if (ptr + sizeof(binder_transaction_data) > end) return;
-                auto *txn = reinterpret_cast<binder_transaction_data *>(ptr);
-                process_reply(txn);
+                if (static_cast<size_t>(end - ptr) < sizeof(binder_transaction_data)) return;
+                binder_transaction_data txn{};
+                std::memcpy(&txn, ptr, sizeof(txn));
+                process_reply(&txn);
+                std::memcpy(ptr, &txn, sizeof(txn));
                 ptr += sizeof(binder_transaction_data);
                 break;
             }
             case BR_TRANSACTION: {
-                if (ptr + sizeof(binder_transaction_data) > end) return;
+                if (static_cast<size_t>(end - ptr) < sizeof(binder_transaction_data)) return;
                 ptr += sizeof(binder_transaction_data);
                 break;
             }
@@ -664,7 +677,7 @@ void process_read(binder_write_read *bwr) {
                 break;
             case BR_DEAD_BINDER:
             case BR_CLEAR_DEATH_NOTIFICATION_DONE:
-                if (ptr + sizeof(binder_uintptr_t) > end) return;
+                if (static_cast<size_t>(end - ptr) < sizeof(binder_uintptr_t)) return;
                 ptr += sizeof(binder_uintptr_t);
                 break;
             default:
@@ -711,8 +724,17 @@ int hook_ioctl(int fd, unsigned long request, void *arg) {
     }
 
     auto *bwr = reinterpret_cast<binder_write_read *>(arg);
-    process_write(bwr);
+    FreeBufferPatch patch;
+    process_write(bwr, patch);
     const int ret = g_original_ioctl ? g_original_ioctl(fd, request, arg) : -1;
+    if (patch.slot) {
+        if (ret == 0 && bwr->write_consumed >= patch.consumed_end) {
+            g_active_swap_ptr = nullptr;
+            g_original_reply_ptr = 0;
+        } else {
+            std::memcpy(patch.slot, &patch.swap_pointer, sizeof(patch.swap_pointer));
+        }
+    }
     if (ret == 0) process_read(bwr);
     return ret;
 }
@@ -827,9 +849,6 @@ bool install_jni_hook(JNIEnv *env, zygisk::Api *api) {
     env->DeleteLocalRef(binder_proxy);
     clear_jni_exception(env);
 
-    // Zygisk stores the previous function pointer in fnPtr.  Refuse to
-    // enable the hook if an older API implementation did not provide it;
-    // install_hooks() then supplies the compatibility path.
     auto original = reinterpret_cast<TransactNativeFn>(method.fnPtr);
     if (!original || original == hook_transact_native || reinterpret_cast<void *>(original) == thunk) {
         log_error("JNI BinderProxy hook did not return original function");
@@ -837,7 +856,7 @@ bool install_jni_hook(JNIEnv *env, zygisk::Api *api) {
     }
     g_original_transact_native = original;
     g_jni_hook_installed = true;
-    log_info("BinderProxy.transactNative hook installed (anonymous thunk)");
+    log_info("BinderProxy.transactNative hook installed");
     return true;
 }
 
@@ -853,9 +872,17 @@ void install_hooks(zygisk::Api *api) {
         log_error("libbinder mapping not found; cannot install ioctl hook");
         return;
     }
+    g_original_ioctl = reinterpret_cast<IoctlFn>(dlsym(RTLD_DEFAULT, "ioctl"));
+    if (!g_original_ioctl) {
+        log_error("ioctl original unavailable; leaving Binder unchanged");
+        return;
+    }
 
     void *thunk = make_anonymous_thunk(reinterpret_cast<void *>(hook_ioctl));
-    if (!thunk) thunk = reinterpret_cast<void *>(hook_ioctl);
+    if (!thunk) {
+        log_error("anonymous ioctl trampoline unavailable; leaving Binder unchanged");
+        return;
+    }
     for (const auto &mapping : mappings) {
         api->pltHookRegister(mapping.dev, mapping.inode, "ioctl", thunk,
                              reinterpret_cast<void **>(&g_original_ioctl));

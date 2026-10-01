@@ -9,12 +9,13 @@ if [[ -z "$SO_PATH" || ! -f "$SO_PATH" ]]; then
 fi
 
 echo "[ELF] exported symbols"
-readelf -Ws "$SO_PATH" | awk '$4 == "FUNC" && $7 != "UND" {print}'
-if readelf -Ws "$SO_PATH" | grep -Eq ' (hook_ioctl|hook_transact_native|install_hooks)$'; then
-  echo "error: private hook symbol is visible" >&2
+SYMBOLS="$(readelf --wide -Ws "$SO_PATH")"
+awk '$4 == "FUNC" && $7 != "UND" {print}' <<< "$SYMBOLS"
+if ! awk '$4 ~ /^(FUNC|OBJECT)$/ && $7 !~ /^(UND|ABS)$/ && $8 != "zygisk_module_entry" { print; invalid=1 } END { exit invalid }' <<< "$SYMBOLS"; then
+  echo "error: private defined ELF symbols are visible" >&2
   exit 1
 fi
-readelf -Ws "$SO_PATH" | grep -q 'zygisk_module_entry' || {
+awk '$4 == "FUNC" && $7 != "UND" && $8 == "zygisk_module_entry" { found=1 } END { exit !found }' <<< "$SYMBOLS" || {
   echo "error: zygisk_module_entry is missing" >&2
   exit 1
 }
