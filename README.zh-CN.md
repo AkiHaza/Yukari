@@ -10,7 +10,12 @@ ServiceManager 服务信号。固定匹配关键字为 `lineage`、`crdroid`、`
 的 JNI hook，并在 `postAppSpecialize` 清理一次 `ServiceManager.sCache`。该路径在 Parcel
 层完成过滤，不改写 `libbinder.so` 的 PLT/GOT：
 
-- 不改写 `getService`/`checkService` 请求（避免框架初始化因 null Binder 崩溃）；
+- 读取运行时 `IServiceManager.Stub.TRANSACTION_*`，兼容新 Lineage 插入
+  `getService2`/`checkService2` 后的事务编号变化，不仅根据 SDK_INT 猜测；
+- `getService`/`checkService` 及其 `*2` 版本仅对明确来自应用的匹配查询进行等长
+  名称替换；先复制请求 Parcel，保留调用方原始内容与位置；
+- 调用栈跳过 Binder/ServiceManager 和反射转发帧，以第一个实际调用方判定；
+  框架/Lineage 调用、无法识别的调用和分类失败均保留真实 Binder，避免初始化 NPE；
 - `listServices` 的 `String[]` 回复被过滤并以相同 UTF-16 长度写回；
 - `getServiceDebugInfo` 的 `ServiceDebugInfo[]` 名称被过滤；
 - 直接使用 `transactNative` 传入的 Java `Parcel` 对象，不接管 native 所有权；
@@ -19,6 +24,13 @@ ServiceManager 服务信号。固定匹配关键字为 `lineage`、`crdroid`、`
 在极旧系统上，如果 JNI 方法签名不可用，则回退到 ioctl 过滤。回退路径仍然
 使用原有的安全缓冲区交换，并通过匿名、RX-only 跳板作为 PLT 替换地址，避免
 GOT 槽直接指向模块 `.text`。
+该回退路径仍只过滤枚举/调试回复，不对直接 lookup 做调用方分类或重写。
+
+`sCache` 仍仅在 specialization 时清理一次，不在事务回调中并发修改 Map。
+核对的 Lineage `getCommonServicesLocked` 不向应用预填 `profile`，普通 lookup miss
+也不会回填 `sCache`；厂商动态注入匹配缓存、纯 native libbinder 直查，以及通过
+受信任框架/Lineage API 间接获取服务仍可能绕过当前边界。前缀保护是启动兼容策略，
+不是强制安全边界；不能承诺任何检测方式均不可见。
 
 ## 可观察特征取舍
 
@@ -67,6 +79,8 @@ Magisk 管理器没有终端时，音量上键全选合并、音量下键进入�
 
    本地需要 JDK 17、Gradle 8.11.1 和 Android SDK/NDK。仓库的 `gradlew` 是调用
    `PATH` 中 Gradle 的入口；CI 使用 `setup-gradle` 安装固定版本。
+   CI 的 SDK setup 显式只安装 `platform-tools`，避免 action 默认安装已下架的
+   `tools` 包导致编译之前失败；SDK 36、NDK 和 CMake 仍由后续步骤固定安装。
 
    ```bash
    ./gradlew :module:assembleRelease
@@ -97,6 +111,10 @@ Magisk 管理器没有终端时，音量上键全选合并、音量下键进入�
 5. **功能回归**
 
    在目标应用中调用 `getService("profile")`、`checkService`、
-   `listServices` 和 `getServiceDebugInfo`。批量枚举和调试信息中的匹配项应
-   不可见；直接 lookup 保持原始 Binder（避免初始化 NPE）；非匹配项及 Binder
-   对象均保持正常，启动阶段不得出现 native 崩溃。
+   `listServices` 和 `getServiceDebugInfo`，并覆盖新的 `getService2`/`checkService2`。
+   批量枚举和调试信息中的匹配项应不可见；应用直接 lookup 匹配项应拿不到服务，
+   框架启动和 Lineage 内部查询应仍获取真实 Binder。不要通过外部 `adb shell service list`
+   判断过滤结果：它不在目标应用进程内。非匹配项、非目标应用均保持正常。
+   同时验证请求 `dataSize/dataPosition` 和字节内容未改变、真实 Binder 异常仍正常传播。
+   确认 logcat 的 `SM transactions` 日志与该 ROM 的实际事务号一致；启动阶段不得出现
+   NPE 或 native 崩溃。

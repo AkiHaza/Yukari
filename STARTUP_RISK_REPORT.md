@@ -5,13 +5,14 @@
 修复。
 
 这里的“安全”表示源码检查未发现该项原有的确定性崩溃路径，不代表已通过真机验收。
-本机缺少 Gradle、Android SDK/NDK，且没有 adb 设备；编译、服务回归、maps/GOT 检查仍待执行。
+本机缺少 Gradle、Android SDK/NDK，当前 adb 设备处于 sideload 模式；完整 Android 构建、
+真机服务回归和 maps/GOT 检查仍待执行。本次额外交叉编译和 JNI 模拟验证的范围见第 10 节。
 
 ## 结论摘要
 
 | 检查项 | 结论 | 处理 |
 | --- | --- | --- |
-| Binder 直接 lookup 误伤 | 安全（已修复） | JNI/ioctl 路径均不改写 `getService`/`checkService` 请求 |
+| Binder 直接 lookup 误伤 | 已缓解，待设备验证 | JNI 仅改写应用直查；框架/Lineage/未知调用方放行，ioctl 不改直查 |
 | `sCache` 清理时机 | 基本安全 | 仅在 `postAppSpecialize` 清理一次，避免事务回调并发修改 `ArrayMap`；检查 JNI 异常与 key 类型 |
 | `FORCE_DENYLIST_UNMOUNT` | 已缓解（仍需设备验证） | 仅目标进程启用；新增 `force_denylist_unmount` 配置开关，默认 `true`，兼容性问题可关闭 |
 | 等长 String16 替换 | 安全 | 所有 offset/长度/对齐均做边界检查；过大或 malformed Parcel 跳过 |
@@ -27,18 +28,26 @@
 `profile` 等服务返回空 Binder 会让框架初始化代码收到 null，典型结果是
 `ClientTransactionListenerController` 或 ROM 自定义初始化逻辑 NPE。
 
-当前实现的 JNI 主路径只用请求 Parcel 的 interface token 识别
-`android.os.IServiceManager`，兼容 0/4/8/12/16 字节的 Android 请求头，不会修改直接 lookup 请求；ioctl 回退的
-`process_transaction()` 也只为 `listServices` / `getServiceDebugInfo` 建立待处理回复状态，不改写请求。过滤边界放在
-这两类回复，因此批量枚举仍被隐藏，而框架直接
-查询得到的 Binder 不会被强制变成 null。
+JNI 主路径用请求 Parcel 的 interface token 识别 `android.os.IServiceManager`，
+兼容 0/4/8/12/16 字节的 Android 请求头。此前完全放行直接 lookup 虽保护了初始化，
+也让应用仍可直接探测 `profile`。现在仅对明确的应用调用改写匹配查询名，覆盖
+`getService/checkService/getService2/checkService2`。调用栈跳过 Binder、ServiceManager
+和反射转发帧，以第一个实际调用方决定策略；框架和 Lineage 命名空间保持真实服务，
+其他启动平台类通过不初始化的 boot-class lookup 识别并放行。无有效调用帧或 JNI
+分类失败时放行，不根据栈深处的应用帧误判框架自查询。
 
-**结论：安全（已修复）。** 回归时应分别调用 `getService("profile")`、
-`checkService("profile")`，确认调用链和非目标服务不受影响。
+名称改写发生在 `Parcel.obtain + appendFrom` 创建的独立请求上；验证写入位置和
+dataSize 与原字段/Parcel 等长，不更改调用方原始字节和位置，也不重建 Binder 回复。
+副本回收保存并恢复真实 Binder 抛出的 Java 异常；可选操作失败时调用原请求。
+ioctl 回退仍只为枚举/调试事务建立待处理回复状态，不改写直接 lookup。
+
+**结论：已缓解，待设备验证。** 应用直查匹配项应取不到服务，而框架初始化查询仍
+能取到真实 Binder。受信任前缀是兼容策略而非不可绕过的安全边界，native-only 客户端
+和通过 Lineage 框架 API 的间接查询不承诺隐藏。
 
 ## 2. `ServiceManager.sCache` 清理
 
-`postAppSpecialize` 中清理一次缓存是必要的，但缓存可能在后续 lookup 中重新填充。
+`postAppSpecialize` 中清理一次缓存是必要的，但厂商代码可能在后续注入缓存。
 当前 `clear_cache()`：
 
 - 对 `FindClass`、字段/方法查找、Java 调用逐步检查异常；
@@ -143,7 +152,7 @@ native 入口却不返回原指针，公开 API 没有恢复原函数的手段�
 ## 建议的最小回归矩阵
 
 1. 冷启动目标应用，观察 logcat 无 NPE、`SecurityException` 或 native tombstone；
-2. 调用 `getService/checkService("profile")`，确认不返回被强制替换的 null；
+2. 应用直查 `getService/checkService("profile")` 应取不到服务；框架/Lineage 启动查询必须获取原始 Binder，同时覆盖 `*2` 接口；
 3. 调用 `listServices`、`getServiceDebugInfo`，确认匹配项不可见、普通项完整；
 4. 读取 `ServiceManager.sCache`，确认匹配 key 不存在；
 5. 在 owner + work profile 下运行 action，确认 targets 合并且旧手工项保留；
@@ -170,10 +179,11 @@ adb shell 'cat /proc/$(pidof <target>)/maps | grep -E "yukari|rwxp"'
 
 ### Transaction compatibility note
 
-`IServiceManager` 的事务号按 AOSP Android 11–16 标签中的 AIDL 方法顺序核对：
-`listServices` 始终为 4；`getServiceDebugInfo` 在 Android 12/13/14–16
-分别为 12/13/14。Android 11 及更早版本没有该调试方法，回退路径不猜测其事务号。
-厂商若修改 AIDL 顺序，应按实际 ROM 源码验证后再适配，避免把其他服务回复当成列表改写。
+旧版本根据 AOSP release 标签选择固定事务号，但同 SDK 的新 Lineage 分支可能插入
+`getService2/checkService2`：已核对的 `lineage-23.0` AIDL 中 list/debug 为 6/16，
+不再是旧的 4/14。现在 JNI 和 ioctl 枚举路径共用运行时
+`IServiceManager.Stub.TRANSACTION_*` 字段，字段不存在时禁用对应操作，不猜测新版事务。
+只有 Android 8/9 的旧手写接口使用 1/2/4。启动日志打印实际解析的事务号供设备核对。
 
 JNI 主路径下 `ioctl` GOT 应保持原始 libbinder 地址；仅启用旧系统回退时，使用
 `dladdr` 检查 GOT 槽落在匿名 `r-xp` 跳板映射。由于回调代码仍驻留模块库，当前方案
@@ -206,3 +216,34 @@ JNI/native 可选路径对初始化、Parcel 字符串和回退安装增加了�
   已定义入口。三项模拟符号表用例通过（正常、私有 C++ 符号泄露、只有未定义入口）。
 - `gradlew` 是 PATH Gradle 的轻量入口，Git 中具有执行位；CI 已安装 Gradle 8.11.1。
 - 没有可用的本地 release so/zip；不能据此宣称 ELF、应用启动或运行时隐蔽性验收通过。
+
+## 10. CI 报错与 Lineage `profile` 可见性修复
+
+附带 CI 日志显示失败发生在 `setup-android@v3` 执行 `sdkmanager tools`，报
+`Failed to find package 'tools'`，尚未进入 Gradle 编译。核对该 action 的 `packages`
+默认值为 `tools platform-tools`，已显式改为 `platform-tools`；后续仍按原工作流安装
+SDK 36、build-tools 35.0.0、NDK 27.2.12479018 和 CMake 3.22.1。日志中的 Node 版本
+警告不是此次失败原因，没有为此改动无关构建步骤。
+
+`profile` 有两个源码可证实的覆盖缺口：直接 lookup 原先被完全放行；新 Lineage
+同 SDK 的 AIDL 方法插入导致枚举事务编号变化。修复采用运行时事务字段与应用调用方
+判定，不全局隐藏服务，也不无条件给框架初始化返回 null。原有服务名匹配、缓存清理、
+等长 Parcel 替换、targets 范围和 Gradle/CMake 构建体系保持不变。
+
+本地验证结果：
+
+- actionlint（含 ShellCheck）、模块 POSIX shell 检查和 `git diff --check` 通过；
+- 真实修改后的 C++ 源码使用 Clang/Zig、Android JNI 头和 Linux Binder UAPI 成功生成
+  ARM64 Linux 目标对象；此项不是 NDK/Android 完整链接或 Gradle release 构建；
+- 临时 JVM/JNI 模拟夹具直接编译当前 `binder_hook.cpp` 与 `service_match.cpp`，
+  在同一 SDK_INT=36 下使用两种 Stub 布局，分别通过 70/76 项断言，CheckJNI 零警告；
+- JNI 断言覆盖 0/4/8/12/16 字节请求头、大小写与精确匹配、反射调用、框架/Lineage 放行、
+  `*2` lookup、原始请求不变、复制失败降级、真实异常保留、列表和 debug parcelable；
+- 既有 13 项 JSON、11 项 action 冒烟、3 项模拟 ELF 门禁回归通过；
+- 35 个跟踪文件均存在、非空、UTF-8/LF、无 NUL；`git fsck --full` 无对象损坏，
+  仅提示历史未引用 blob，不作清理。
+
+模拟夹具不构成真机 Binder 服务或检测应用的验收。正常开机后仍须验证目标应用冷启动、
+ServiceManager 直查/枚举、非目标对照和新事务日志。纯 native libbinder 查询、
+可信前缀下的间接查询以及厂商后续注入 `sCache` 仍属于已知边界；若检测仍存在，
+需提供检测应用/调用路径与 ROM 版本，不能仅凭 `profile` 匹配规则已存在宣称彻底解决。

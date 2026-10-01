@@ -46,15 +46,18 @@ bool g_jni_hook_installed = false;
 
 constexpr const char *kIServiceManagerDescriptor = "android.os.IServiceManager";
 
-// BinderProxy's native method is stable since API 26. IServiceManager.aidl
-// keeps listServices at transaction 4; getServiceDebugInfo moved as methods
-// were appended. The interface token check also gates these transaction IDs.
 constexpr jint kSvcListServices = 4;
-// getServiceDebugInfo moved on Android 12-14 and remains at transaction 14
-// on Android 15-16. Select its transaction number from SDK_INT below.
-constexpr jint kSvcGetServiceDebugInfoAndroid12 = 12;
-constexpr jint kSvcGetServiceDebugInfoAndroid13 = 13;
-constexpr jint kSvcGetServiceDebugInfoAndroid14 = 14;
+
+struct ServiceTransactions {
+    jint get_service = 0;
+    jint check_service = 0;
+    jint get_service2 = 0;
+    jint check_service2 = 0;
+    jint list_services = 0;
+    jint debug_info = 0;
+};
+
+ServiceTransactions g_service_transactions;
 
 // Binder command buffers are bounded by the kernel's transaction limit.  Keep
 // a conservative userspace ceiling before doing pointer arithmetic on data
@@ -69,7 +72,23 @@ struct ParcelMethods {
     jmethodID read_string = nullptr;
     jmethodID write_string = nullptr;
     jmethodID read_int = nullptr;
+    jmethodID obtain = nullptr;
+    jmethodID append_from = nullptr;
+    jmethodID recycle = nullptr;
 };
+
+struct CallerMethods {
+    jclass thread_class = nullptr;
+    jclass class_class = nullptr;
+    jclass class_not_found = nullptr;
+    jmethodID current_thread = nullptr;
+    jmethodID get_stack_trace = nullptr;
+    jmethodID get_class_name = nullptr;
+    jmethodID for_name = nullptr;
+};
+
+CallerMethods g_caller_methods;
+bool g_caller_methods_ready = false;
 
 ParcelMethods g_parcel_methods;
 pthread_mutex_t g_parcel_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -184,18 +203,59 @@ jint sdk_int(JNIEnv *env) {
 
 bool is_list_transaction(JNIEnv *env, jint code) {
     (void)env;
-    return code == kSvcListServices;
+    return g_service_transactions.list_services > 0 && code == g_service_transactions.list_services;
 }
 
 bool is_debug_transaction(JNIEnv *env, jint code) {
+    (void)env;
+    return g_service_transactions.debug_info > 0 && code == g_service_transactions.debug_info;
+}
+
+bool is_lookup_transaction(jint code) {
+    return code > 0 && (code == g_service_transactions.get_service ||
+                       code == g_service_transactions.check_service ||
+                       code == g_service_transactions.get_service2 ||
+                       code == g_service_transactions.check_service2);
+}
+
+void init_service_transactions(JNIEnv *env) {
     const jint sdk = sdk_int(env);
-    if (sdk >= 34) return code == kSvcGetServiceDebugInfoAndroid14;
-    if (sdk >= 33) return code == kSvcGetServiceDebugInfoAndroid13;
-    if (sdk >= 31) return code == kSvcGetServiceDebugInfoAndroid12;
-    // Android 11 and older do not expose getServiceDebugInfo. Do not guess
-    // here: transaction 10 is a real tryUnregisterService call on those
-    // releases and parsing it as a reply could corrupt a Parcel.
-    return false;
+    ServiceTransactions transactions;
+    if (sdk >= 26 && sdk <= 28) {
+        transactions.get_service = 1;
+        transactions.check_service = 2;
+        transactions.list_services = kSvcListServices;
+    }
+
+    jclass stub = env ? env->FindClass("android/os/IServiceManager$Stub") : nullptr;
+    if (stub) {
+        const auto transaction = [&](const char *name) -> jint {
+            const jfieldID field = env->GetStaticFieldID(stub, name, "I");
+            if (!field || env->ExceptionCheck()) {
+                clear_jni_exception(env);
+                return 0;
+            }
+            const jint value = env->GetStaticIntField(stub, field);
+            if (env->ExceptionCheck()) {
+                clear_jni_exception(env);
+                return 0;
+            }
+            return value > 0 ? value : 0;
+        };
+        transactions.get_service = transaction("TRANSACTION_getService");
+        transactions.check_service = transaction("TRANSACTION_checkService");
+        transactions.get_service2 = transaction("TRANSACTION_getService2");
+        transactions.check_service2 = transaction("TRANSACTION_checkService2");
+        transactions.list_services = transaction("TRANSACTION_listServices");
+        transactions.debug_info = transaction("TRANSACTION_getServiceDebugInfo");
+        env->DeleteLocalRef(stub);
+    } else {
+        clear_jni_exception(env);
+    }
+    g_service_transactions = transactions;
+    log_info("SM transactions: get=%d check=%d get2=%d check2=%d list=%d debug=%d",
+             transactions.get_service, transactions.check_service, transactions.get_service2,
+             transactions.check_service2, transactions.list_services, transactions.debug_info);
 }
 
 bool init_parcel_methods(JNIEnv *env) {
@@ -243,6 +303,18 @@ bool init_parcel_methods(JNIEnv *env) {
         return false;
     }
 
+    methods.obtain = env->GetStaticMethodID(methods.cls, "obtain", "()Landroid/os/Parcel;");
+    if (!env->ExceptionCheck() && methods.obtain) {
+        methods.append_from = find_method("appendFrom", "(Landroid/os/Parcel;II)V");
+        methods.recycle = find_method("recycle", "()V");
+    }
+    if (env->ExceptionCheck()) {
+        clear_jni_exception(env);
+        methods.obtain = nullptr;
+        methods.append_from = nullptr;
+        methods.recycle = nullptr;
+    }
+
     g_parcel_methods = methods;
     g_parcel_methods_ready.store(true, std::memory_order_release);
     pthread_mutex_unlock(&g_parcel_mutex);
@@ -282,24 +354,37 @@ jstring replacement_for(JNIEnv *env, jstring value) {
     }
 }
 
-bool parcel_has_service_manager(JNIEnv *env, jobject parcel) {
-    if (!env || !parcel) return false;
+jint service_manager_name_position(JNIEnv *env, jobject parcel) {
+    if (!env || !parcel) return -1;
     const jint original_position = env->CallIntMethod(parcel, g_parcel_methods.data_position);
     if (env->ExceptionCheck() || original_position < 0) {
         clear_jni_exception(env);
-        return false;
+        return -1;
     }
     const jint size = env->CallIntMethod(parcel, g_parcel_methods.data_size);
     if (env->ExceptionCheck()) {
         clear_jni_exception(env);
-        return false;
+        return -1;
     }
     // writeInterfaceToken prepends a kernel request header.  Its size changed
     // across releases: one int (O/P), two ints (Q), three ints (R), and four
     // ints on newer builds.  RPC parcels have no header and use offset zero.
     constexpr jint kCandidateOffsets[] = {0, 4, 8, 12, 16};
+    constexpr jint kDescriptorLength = sizeof("android.os.IServiceManager") - 1;
+    constexpr jint kDescriptorBytes = 4 + ((2 * (kDescriptorLength + 1) + 3) & ~3);
     for (jint offset : kCandidateOffsets) {
-        if (offset > size - static_cast<jint>(sizeof(jint))) continue;
+        if (offset > size - kDescriptorBytes) continue;
+        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, offset);
+        if (env->ExceptionCheck()) {
+            clear_jni_exception(env);
+            break;
+        }
+        const jint length = env->CallIntMethod(parcel, g_parcel_methods.read_int);
+        if (env->ExceptionCheck()) {
+            clear_jni_exception(env);
+            continue;
+        }
+        if (length != kDescriptorLength) continue;
         env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, offset);
         if (env->ExceptionCheck()) {
             clear_jni_exception(env);
@@ -318,14 +403,196 @@ bool parcel_has_service_manager(JNIEnv *env, jobject parcel) {
             break;
         }
         if (value == kIServiceManagerDescriptor) {
-            env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, original_position);
+            const jint name_position = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+            const bool valid = !env->ExceptionCheck() && name_position >= 0 && name_position <= size;
             clear_jni_exception(env);
-            return true;
+            env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, original_position);
+            const bool restored = !env->ExceptionCheck();
+            clear_jni_exception(env);
+            return valid && restored ? name_position : -1;
         }
     }
     env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, original_position);
     clear_jni_exception(env);
-    return false;
+    return -1;
+}
+
+bool init_caller_methods(JNIEnv *env) {
+    if (g_caller_methods_ready) return true;
+    if (!env || env->ExceptionCheck()) return false;
+    if (env->PushLocalFrame(8) < 0) {
+        clear_jni_exception(env);
+        return false;
+    }
+    CallerMethods methods;
+    jclass thread = env->FindClass("java/lang/Thread");
+    jclass element = !env->ExceptionCheck() ? env->FindClass("java/lang/StackTraceElement") : nullptr;
+    jclass class_class = !env->ExceptionCheck() ? env->FindClass("java/lang/Class") : nullptr;
+    jclass class_not_found = !env->ExceptionCheck() ? env->FindClass("java/lang/ClassNotFoundException") : nullptr;
+    if (thread && element && class_class && class_not_found && !env->ExceptionCheck()) {
+        methods.current_thread = env->GetStaticMethodID(thread, "currentThread", "()Ljava/lang/Thread;");
+        if (!env->ExceptionCheck()) {
+            methods.get_stack_trace = env->GetMethodID(thread, "getStackTrace", "()[Ljava/lang/StackTraceElement;");
+        }
+        if (!env->ExceptionCheck()) {
+            methods.get_class_name = env->GetMethodID(element, "getClassName", "()Ljava/lang/String;");
+        }
+        if (!env->ExceptionCheck()) {
+            methods.for_name = env->GetStaticMethodID(class_class, "forName",
+                                                     "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
+        }
+        if (!env->ExceptionCheck()) methods.thread_class = static_cast<jclass>(env->NewGlobalRef(thread));
+        if (!env->ExceptionCheck()) methods.class_class = static_cast<jclass>(env->NewGlobalRef(class_class));
+        if (!env->ExceptionCheck()) methods.class_not_found = static_cast<jclass>(env->NewGlobalRef(class_not_found));
+    }
+    const bool ready = !env->ExceptionCheck() && methods.current_thread && methods.get_stack_trace &&
+                       methods.get_class_name && methods.for_name && methods.thread_class &&
+                       methods.class_class && methods.class_not_found;
+    clear_jni_exception(env);
+    env->PopLocalFrame(nullptr);
+    if (!ready) {
+        if (methods.thread_class) env->DeleteGlobalRef(methods.thread_class);
+        if (methods.class_class) env->DeleteGlobalRef(methods.class_class);
+        if (methods.class_not_found) env->DeleteGlobalRef(methods.class_not_found);
+        return false;
+    }
+    g_caller_methods = methods;
+    g_caller_methods_ready = true;
+    return true;
+}
+
+bool is_app_service_caller(JNIEnv *env) {
+    if (!g_caller_methods_ready || !env || env->ExceptionCheck()) return false;
+    if (env->PushLocalFrame(8) < 0) {
+        clear_jni_exception(env);
+        return false;
+    }
+    bool app_caller = false;
+    jobject thread = env->CallStaticObjectMethod(g_caller_methods.thread_class, g_caller_methods.current_thread);
+    auto stack = thread && !env->ExceptionCheck()
+                     ? static_cast<jobjectArray>(env->CallObjectMethod(thread, g_caller_methods.get_stack_trace))
+                     : nullptr;
+    const jsize count = stack && !env->ExceptionCheck() ? env->GetArrayLength(stack) : 0;
+    for (jsize index = 0; !env->ExceptionCheck() && index < count && index < 96; ++index) {
+        jobject element = env->GetObjectArrayElement(stack, index);
+        auto name = element && !env->ExceptionCheck()
+                        ? static_cast<jstring>(env->CallObjectMethod(element, g_caller_methods.get_class_name))
+                        : nullptr;
+        const std::string class_name = !env->ExceptionCheck() ? jstring_ascii(env, name) : std::string();
+        if (env->ExceptionCheck() || class_name.empty()) break;
+        constexpr const char *kPlumbing[] = {
+            "android.os.BinderProxy", "android.os.ServiceManager", "android.os.IServiceManager$",
+            "java.lang.Thread", "java.lang.reflect.", "java.lang.invoke.", "jdk.internal.reflect.",
+            "sun.reflect.", "libcore.reflect.", "dalvik.system.VMStack",
+        };
+        bool plumbing = false;
+        for (const char *prefix : kPlumbing) {
+            if (class_name.starts_with(prefix)) {
+                plumbing = true;
+                break;
+            }
+        }
+        if (plumbing) {
+            if (name) env->DeleteLocalRef(name);
+            if (element) env->DeleteLocalRef(element);
+            continue;
+        }
+        constexpr const char *kSystemPrefixes[] = {
+            "android.", "com.android.", "java.", "javax.", "jdk.", "sun.", "libcore.",
+            "dalvik.", "lineageos.", "org.lineageos.", "com.lineageos.",
+        };
+        bool framework = false;
+        for (const char *prefix : kSystemPrefixes) {
+            if (class_name.starts_with(prefix)) {
+                framework = true;
+                break;
+            }
+        }
+        if (!framework) {
+            jobject boot_class = env->CallStaticObjectMethod(g_caller_methods.class_class,
+                                                            g_caller_methods.for_name, name, JNI_FALSE, nullptr);
+            if (env->ExceptionCheck()) {
+                jthrowable failure = env->ExceptionOccurred();
+                env->ExceptionClear();
+                app_caller = failure && env->IsInstanceOf(failure, g_caller_methods.class_not_found);
+                if (failure) env->DeleteLocalRef(failure);
+            }
+            if (boot_class) env->DeleteLocalRef(boot_class);
+        }
+        break;
+    }
+    clear_jni_exception(env);
+    env->PopLocalFrame(nullptr);
+    return app_caller;
+}
+
+void recycle_request(JNIEnv *env, jobject parcel) {
+    if (!parcel) return;
+    jthrowable pending = env->ExceptionOccurred();
+    if (pending) env->ExceptionClear();
+    env->CallVoidMethod(parcel, g_parcel_methods.recycle);
+    clear_jni_exception(env);
+    env->DeleteLocalRef(parcel);
+    if (pending) {
+        env->Throw(pending);
+        env->DeleteLocalRef(pending);
+    }
+}
+
+jobject filtered_lookup_request(JNIEnv *env, jobject parcel, jint name_position) {
+    if (!g_parcel_methods.obtain || !g_parcel_methods.append_from || !g_parcel_methods.recycle ||
+        env->ExceptionCheck()) return nullptr;
+    if (env->PushLocalFrame(8) < 0) {
+        clear_jni_exception(env);
+        return nullptr;
+    }
+    const jint original_position = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+    const jint size = !env->ExceptionCheck() ? env->CallIntMethod(parcel, g_parcel_methods.data_size) : -1;
+    jstring name = nullptr;
+    jint end = -1;
+    if (!env->ExceptionCheck() && original_position >= 0 && size <= MAX_REPLY_BUF &&
+        name_position >= 0 && name_position <= size - 4) {
+        env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, name_position);
+        if (!env->ExceptionCheck()) {
+            name = static_cast<jstring>(env->CallObjectMethod(parcel, g_parcel_methods.read_string));
+        }
+        if (!env->ExceptionCheck()) end = env->CallIntMethod(parcel, g_parcel_methods.data_position);
+    }
+    const bool valid = !env->ExceptionCheck() && name && end >= name_position + 4 && end <= size;
+    clear_jni_exception(env);
+    if (original_position >= 0) env->CallVoidMethod(parcel, g_parcel_methods.set_data_position, original_position);
+    const std::string service = valid && !env->ExceptionCheck() ? jstring_ascii(env, name) : std::string();
+    jobject copy = nullptr;
+    if (!env->ExceptionCheck() && !service.empty() && hide_service(service) && is_app_service_caller(env)) {
+        jstring replacement = replacement_for(env, name);
+        if (replacement && !env->ExceptionCheck()) {
+            copy = env->CallStaticObjectMethod(g_parcel_methods.cls, g_parcel_methods.obtain);
+        }
+        if (copy && !env->ExceptionCheck()) env->CallVoidMethod(copy, g_parcel_methods.append_from, parcel, 0, size);
+        if (copy && !env->ExceptionCheck()) env->CallVoidMethod(copy, g_parcel_methods.set_data_position, name_position);
+        if (copy && !env->ExceptionCheck()) env->CallVoidMethod(copy, g_parcel_methods.write_string, replacement);
+        const jint copy_end = copy && !env->ExceptionCheck() ? env->CallIntMethod(copy, g_parcel_methods.data_position) : -1;
+        const jint copy_size = copy && !env->ExceptionCheck() ? env->CallIntMethod(copy, g_parcel_methods.data_size) : -1;
+        if (copy && !env->ExceptionCheck() && copy_end == end && copy_size == size) {
+            env->CallVoidMethod(copy, g_parcel_methods.set_data_position, original_position);
+        } else if (copy) {
+            clear_jni_exception(env);
+            recycle_request(env, copy);
+            copy = nullptr;
+        }
+    }
+    if (env->ExceptionCheck()) {
+        clear_jni_exception(env);
+        if (copy) recycle_request(env, copy);
+        copy = nullptr;
+    }
+    jobject retained = env->PopLocalFrame(copy);
+    if (env->ExceptionCheck()) {
+        clear_jni_exception(env);
+        if (retained) recycle_request(env, retained);
+        return nullptr;
+    }
+    return retained;
 }
 
 bool filter_reply_string(JNIEnv *env, jobject parcel, jint limit) {
@@ -518,14 +785,10 @@ void process_transaction(const binder_transaction_data &txn) {
     // binder for a framework lookup can make callers crash during startup.
     // Enumeration/debug replies are scrubbed below, which is the stable and
     // low-risk observation boundary.
-    // The ioctl fallback uses the SDK value captured while the hook is
-    // installed. If SDK_INT cannot be read, filter listServices only.
-    const jint sdk = g_sdk_int.load(std::memory_order_acquire);
-    const bool is_list = txn.code == static_cast<uint32_t>(kSvcListServices);
-    bool is_debug = false;
-    if (sdk >= 34) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid14);
-    else if (sdk >= 33) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid13);
-    else if (sdk >= 31) is_debug = txn.code == static_cast<uint32_t>(kSvcGetServiceDebugInfoAndroid12);
+    const bool is_list = g_service_transactions.list_services > 0 &&
+                         txn.code == static_cast<uint32_t>(g_service_transactions.list_services);
+    const bool is_debug = g_service_transactions.debug_info > 0 &&
+                          txn.code == static_cast<uint32_t>(g_service_transactions.debug_info);
     g_pending_sm_reply = is_list || is_debug;
 }
 
@@ -690,21 +953,26 @@ jboolean hook_transact_native(JNIEnv *env, jobject thiz, jint code, jobject data
                               jint flags) {
     (void)thiz;
     if (!g_original_transact_native) return JNI_FALSE;
+    if (!env || env->ExceptionCheck()) {
+        return g_original_transact_native(env, thiz, code, data_obj, reply_obj, flags);
+    }
 
     const bool is_list = is_list_transaction(env, code);
     const bool is_debug = is_debug_transaction(env, code);
-    bool is_service_manager = false;
-    if ((is_list || is_debug) && data_obj != nullptr && init_parcel_methods(env)) {
-        // Only use the request to identify IServiceManager.  Rewriting a
-        // direct getService/checkService name to force a null result can
-        // crash framework code during application initialization.
-        is_service_manager = parcel_has_service_manager(env, data_obj);
+    const bool is_lookup = is_lookup_transaction(code) && (flags & TF_ONE_WAY) == 0;
+    jint name_position = -1;
+    if ((is_list || is_debug || is_lookup) && data_obj != nullptr && init_parcel_methods(env)) {
+        name_position = service_manager_name_position(env, data_obj);
     }
 
-    const jboolean result = g_original_transact_native(env, thiz, code, data_obj, reply_obj, flags);
+    jobject filtered_request = is_lookup && name_position >= 0
+                                   ? filtered_lookup_request(env, data_obj, name_position) : nullptr;
+    const jboolean result = g_original_transact_native(env, thiz, code,
+                                                      filtered_request ? filtered_request : data_obj, reply_obj, flags);
+    if (filtered_request) recycle_request(env, filtered_request);
     // Never swallow an exception raised by the real Binder implementation;
     // callers rely on RemoteException propagation semantics.
-    if (result == JNI_FALSE || !is_service_manager || reply_obj == nullptr || env->ExceptionCheck()) {
+    if (result == JNI_FALSE || name_position < 0 || reply_obj == nullptr || env->ExceptionCheck()) {
         return result;
     }
 
@@ -818,13 +1086,14 @@ std::vector<ElfMappingId> find_mappings() {
 } // namespace
 
 bool install_jni_hook(JNIEnv *env, zygisk::Api *api) {
-    // Capture the platform version even when JNI method lookup is unavailable;
-    // the legacy ioctl path needs it to distinguish debug-info transactions.
-    (void)sdk_int(env);
+    init_service_transactions(env);
     if (g_jni_hook_installed) return true;
     if (!env || !api || !init_parcel_methods(env)) {
         log_error("JNI BinderProxy hook unavailable: Parcel methods not found");
         return false;
+    }
+    if (!init_caller_methods(env)) {
+        log_error("caller classification unavailable; direct service lookups left unchanged");
     }
 
     jclass binder_proxy = env->FindClass("android/os/BinderProxy");
