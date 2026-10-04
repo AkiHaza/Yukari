@@ -1111,15 +1111,14 @@ bool install_jni_hook(JNIEnv *env, zygisk::Api *api) {
         return false;
     }
 
-    void *thunk = make_anonymous_thunk(reinterpret_cast<void *>(hook_transact_native));
-    if (!thunk) thunk = reinterpret_cast<void *>(hook_transact_native);
-    JNINativeMethod method{"transactNative", "(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z", thunk};
+    JNINativeMethod method{"transactNative", "(ILandroid/os/Parcel;Landroid/os/Parcel;I)Z",
+                           reinterpret_cast<void *>(hook_transact_native)};
     api->hookJniNativeMethods(env, "android/os/BinderProxy", &method, 1);
     env->DeleteLocalRef(binder_proxy);
     clear_jni_exception(env);
 
     auto original = reinterpret_cast<TransactNativeFn>(method.fnPtr);
-    if (!original || original == hook_transact_native || reinterpret_cast<void *>(original) == thunk) {
+    if (!original || original == hook_transact_native) {
         log_error("JNI BinderProxy hook did not return original function");
         return false;
     }
