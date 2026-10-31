@@ -16,6 +16,7 @@ Matching is ASCII case-insensitive and built into the module:
 - `pixelexperience`
 - `omnirom`
 - `protonaosp`
+- `profile`
 
 Users configure target applications only. The module does not stop or unregister services globally; filtering is scoped to selected application processes.
 

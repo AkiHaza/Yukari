@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <linux/android/binder.h>
 #include <pthread.h>
@@ -26,12 +27,9 @@
 #define BC_FREE_BUFFER _IOW('c', 3, binder_uintptr_t)
 #endif
 
-// Service Manager Transaction Codes
-#define SVC_GET_SERVICE 1
-#define SVC_CHECK_SERVICE 2
-
-// Max reply buffer size for swap (32KB, enough for listServices/getServiceDebugInfo)
-#define MAX_REPLY_BUF (32 * 1024)
+// Max reply buffer size for swap. ServiceManager list/debug replies can be
+// larger than 32KB on devices with many registered services.
+#define MAX_REPLY_BUF (256 * 1024)
 
 namespace {
 using IoctlFn = int (*)(int, unsigned long, void *);
@@ -141,14 +139,15 @@ size_t process_string16(uint8_t *parcel, size_t size, size_t off, bool &hit) {
     if (hide_service(value)) {
         overwrite_utf16(chars, len);
         hit = true;
-        log_info("scrubbed service string in SM reply: %s", value.c_str());
+        log_info("scrubbed service string in SM parcel: %s", value.c_str());
     }
     return next_off - off;
 }
 
-// Scan a ServiceManager reply buffer for String16 values containing
-// ROM keywords. Covers listServices, getServiceDebugInfo, etc.
-void scan_sm_reply_for_strings(uint8_t *parcel, size_t size) {
+// Scan a Parcel for String16 values containing ROM keywords. The same parser
+// is used for requests and replies: request layouts have gained extra header
+// fields across Android releases, while the string representation is stable.
+void scan_sm_parcel_for_strings(uint8_t *parcel, size_t size) {
     if (!parcel || size < sizeof(int32_t)) return;
     int total_hits = 0;
 
@@ -159,7 +158,7 @@ void scan_sm_reply_for_strings(uint8_t *parcel, size_t size) {
     }
 
     if (total_hits > 0) {
-        log_info("scan_sm_reply: filtered %d service string(s)", total_hits);
+        log_info("scan_sm_parcel: filtered %d service string(s)", total_hits);
     }
 }
 
@@ -168,19 +167,15 @@ void process_transaction(const binder_transaction_data &txn) {
     if (txn.target.handle != 0) return;
     if (txn.flags & TF_ONE_WAY) return;
 
-    g_pending_sm_reply = true;
+    // Rewrite matching names before the transaction reaches ServiceManager.
+    // Do not depend on a particular IServiceManager transaction number or
+    // Parcel header size: both vary between platform releases, and newer
+    // lookup APIs (for example waitForService/isDeclared) would otherwise
+    // leave profile visible to callers.
+    auto *parcel = reinterpret_cast<uint8_t *>(txn.data.ptr.buffer);
+    scan_sm_parcel_for_strings(parcel, static_cast<size_t>(txn.data_size));
 
-    uint32_t code = txn.code;
-    if (code == SVC_GET_SERVICE || code == SVC_CHECK_SERVICE) {
-        auto *parcel = reinterpret_cast<uint8_t *>(txn.data.ptr.buffer);
-        size_t pos = 12; // Skip strict_mode + work_source + header
-        bool hit = false;
-        size_t consumed = process_string16(parcel, static_cast<size_t>(txn.data_size), pos, hit);
-        if (consumed > 0) {
-            pos += consumed;
-            process_string16(parcel, static_cast<size_t>(txn.data_size), pos, hit);
-        }
-    }
+    g_pending_sm_reply = true;
 }
 
 // Copy reply to swap buffer, filter it, and replace the pointer.
@@ -212,7 +207,7 @@ bool swap_reply_buffer(binder_transaction_data *txn) {
         std::memcpy(buf + offsets_off, reinterpret_cast<const void *>(txn->data.ptr.offsets), offsets_size);
     }
 
-    scan_sm_reply_for_strings(buf, data_size);
+    scan_sm_parcel_for_strings(buf, data_size);
 
     txn->data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(buf);
     if (offsets_size > 0 && txn->data.ptr.offsets != 0) {

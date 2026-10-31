@@ -16,6 +16,7 @@ Zygisk 模块，用于隐藏指定目标应用的自定义 ROM 服务信号。
 - `pixelexperience`
 - `omnirom`
 - `protonaosp`
+- `profile`
 
 用户只需配置目标应用。模块不会全局停止或注销服务；过滤仅作用于选定的应用进程。
 
