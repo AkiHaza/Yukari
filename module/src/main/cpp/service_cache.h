@@ -2,4 +2,5 @@
 
 #include <jni.h>
 
-void clear_cache(JNIEnv *env);
+// False means skipped or failed; caller-owned exceptions are preserved.
+bool clear_cache(JNIEnv *env);

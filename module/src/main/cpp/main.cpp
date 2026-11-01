@@ -15,11 +15,20 @@ bool g_enabled_for_process = false;
 
 std::string jstr_to_str(JNIEnv *env, jstring value) {
     if (!env || !value) return {};
+    if (env->ExceptionCheck()) return {};
     const char *raw = env->GetStringUTFChars(value, nullptr);
-    if (!raw) return {};
-    std::string out = raw;
-    env->ReleaseStringUTFChars(value, raw);
-    return out;
+    if (!raw) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return {};
+    }
+    try {
+        std::string out = raw;
+        env->ReleaseStringUTFChars(value, raw);
+        return out;
+    } catch (...) {
+        env->ReleaseStringUTFChars(value, raw);
+        return {};
+    }
 }
 } // namespace
 
@@ -28,7 +37,12 @@ public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
         api_ = api;
         env_ = env;
-        load_config(g_config);
+        try {
+            load_config(g_config);
+        } catch (...) {
+            g_config = {};
+            log_error("configuration load failed; filtering disabled");
+        }
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {

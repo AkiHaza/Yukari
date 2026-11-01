@@ -24,3 +24,9 @@ read -r -a extra_ldflags <<< "${LDFLAGS:-}"
 "$build_dir/config_test"
 
 bash "$root/tests/native/elf_test.sh"
+
+"${CXX:-g++}" -std=c++20 -O2 -Wall -Wextra -Werror \
+    "${extra_cxxflags[@]}" -I"$root/tests/native/include" -I"$root/module/src/main/cpp" \
+    "$root/tests/native/cache_test.cpp" "$root/module/src/main/cpp/service_match.cpp" \
+    "${extra_ldflags[@]}" -o "$build_dir/cache_test"
+"$build_dir/cache_test"
