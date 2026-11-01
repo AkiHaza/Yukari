@@ -38,6 +38,11 @@ expect_status() {
     set -e
     [[ $status == "$expected" ]] || fail "expected exit $expected, got $status"
 }
+with_ignored_sigpipe() {
+    # An ignored disposition survives exec, matching the GitHub runner that
+    # makes GNU yes report EPIPE/exit 1 instead of dying with status 141.
+    bash -c 'trap "" PIPE; exec "$@"' _ "$@"
+}
 reset_fake() {
     : >"$FAKE_SDK_LOG"
     : >"$ci_env"
@@ -173,6 +178,32 @@ expect_status 29 "${environment[@]}" ANDROID_SDK_ROOT="$sdk" FAKE_INSTALL_STATUS
 grep -Fq INSTALL_FAILURE_DETAILS "$output" || fail 'installation failure details were hidden'
 absent "$FAKE_SDK_LOG" --list_installed
 absent "$output" PRIVATE_LICENSE_BODY
+
+# CI may inherit SIGPIPE=SIG_IGN. Prove the wrapper really reproduces GNU
+# yes's exit 1, then require sdkmanager's status to remain authoritative.
+expect_status 0 with_ignored_sigpipe bash -c '
+    set +e
+    yes 2>/dev/null | head -n 1 >/dev/null
+    statuses=("${PIPESTATUS[@]}")
+    [[ ${statuses[0]} == 1 && ${statuses[1]} == 0 ]]
+'
+reset_fake
+expect_status 0 with_ignored_sigpipe "${environment[@]}" ANDROID_SDK_ROOT="$sdk" bash "$script"
+contains "$FAKE_SDK_LOG" --licenses
+for package in "${expected_packages[@]}"; do contains "$FAKE_SDK_LOG" "$package"; done
+absent "$output" PRIVATE_LICENSE_BODY
+absent "$output" 'license input failed'
+reset_fake
+expect_status 23 with_ignored_sigpipe "${environment[@]}" ANDROID_SDK_ROOT="$sdk" \
+    FAKE_LICENSE_STATUS=23 bash "$script"
+grep -Fq PRIVATE_LICENSE_BODY "$output" || fail 'ignored SIGPIPE swallowed license failure details'
+if grep -Fqx -- platform-tools "$FAKE_SDK_LOG"; then fail 'license failure continued into installation'; fi
+reset_fake
+expect_status 29 with_ignored_sigpipe "${environment[@]}" ANDROID_SDK_ROOT="$sdk" \
+    FAKE_INSTALL_STATUS=29 bash "$script"
+grep -Fq INSTALL_FAILURE_DETAILS "$output" || fail 'ignored SIGPIPE swallowed installation failure details'
+absent "$output" PRIVATE_LICENSE_BODY
+
 installed
 : >"$FAKE_SDK_LOG"
 expect_status 0 "${environment[@]}" ANDROID_SDK_ROOT="$sdk" FAKE_LICENSE_STATUS=23 FAKE_INSTALL_STATUS=29 bash "$script"

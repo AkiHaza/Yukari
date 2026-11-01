@@ -222,18 +222,16 @@ elif [[ $check_only == true ]]; then
     fail 'SDK metadata/tool check failed; run without --check to install'
 else
     printf 'Accepting Android SDK licenses (details shown only on failure).\n'
-    # sdkmanager may close stdin as soon as it has enough answers. The yes
-    # process then receives SIGPIPE; only sdkmanager decides license success.
+    # sdkmanager may close stdin as soon as it has enough answers. Depending on
+    # the inherited SIGPIPE disposition, yes exits 141 or reports EPIPE with
+    # exit 1. Only sdkmanager's status determines license acceptance.
     set +e
-    yes | "$sdkmanager" "--sdk_root=$sdk_root" --licenses >"$temporary/licenses.log" 2>&1
-    license_status=("${PIPESTATUS[@]}")
+    yes 2>/dev/null | "$sdkmanager" "--sdk_root=$sdk_root" --licenses >"$temporary/licenses.log" 2>&1
+    license_status=${PIPESTATUS[1]}
     set -e
-    if [[ ${license_status[1]} != 0 ]]; then
+    if [[ $license_status != 0 ]]; then
         show_log "$temporary/licenses.log"
-        fail "license acceptance failed (sdkmanager exit ${license_status[1]})" "${license_status[1]}"
-    fi
-    if [[ ${license_status[0]} != 0 && ${license_status[0]} != 141 ]]; then
-        fail "license input failed (yes exit ${license_status[0]})" "${license_status[0]}"
+        fail "license acceptance failed (sdkmanager exit $license_status)" "$license_status"
     fi
     printf 'Installing explicit SDK packages:\n'
     printf '  %s\n' "${packages[@]}"
