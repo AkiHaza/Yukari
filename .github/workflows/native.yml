@@ -59,8 +59,7 @@ jobs:
           unzip -l out/Yukari.zip | grep -q 'customize.sh'
           unzip -p out/Yukari.zip module.prop | grep -q 'version='
           unzip -p out/Yukari.zip zygisk/arm64-v8a.so > /tmp/yukari.so
-          readelf -Ws /tmp/yukari.so | grep -q 'zygisk_module_entry'
-          ! readelf -Ws /tmp/yukari.so | grep -q 'zygisk_module_create'
+          bash scripts/verify_elf.sh /tmp/yukari.so --android
 
       - name: Upload Yukari module
         uses: actions/upload-artifact@v4

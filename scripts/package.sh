@@ -43,6 +43,7 @@ if [ -z "$NATIVE_LIBRARY" ]; then
 fi
 
 cp "$NATIVE_LIBRARY" "$STAGE/zygisk/arm64-v8a.so"
+bash "$ROOT_DIR/scripts/verify_elf.sh" "$STAGE/zygisk/arm64-v8a.so" --android
 
 (
   cd "$STAGE"

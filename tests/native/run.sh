@@ -22,3 +22,5 @@ read -r -a extra_ldflags <<< "${LDFLAGS:-}"
     "$root/tests/native/config_test.cpp" "$root/module/src/main/cpp/config.cpp" \
     "${extra_ldflags[@]}" -o "$build_dir/config_test"
 "$build_dir/config_test"
+
+bash "$root/tests/native/elf_test.sh"
