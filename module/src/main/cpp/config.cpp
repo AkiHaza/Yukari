@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 namespace {
 constexpr const char *kConfigPath = "/data/adb/modules/Yukari/config.json";
@@ -138,15 +139,15 @@ bool load_config(YukariConfig &out) {
 
 bool is_target(const YukariConfig &config, const std::string &package_name) {
     if (!config.enabled || package_name.empty()) return false;
-    static const std::vector<std::string> protected_packages = {
+    static constexpr std::string_view protected_packages[] = {
         "android",
         "system",
         "system_server",
         "com.android.systemui",
         "com.android.settings",
     };
-    if (std::find(protected_packages.begin(), protected_packages.end(), package_name) != protected_packages.end()) {
-        return false;
+    for (const auto protected_package : protected_packages) {
+        if (protected_package == package_name) return false;
     }
     return std::find(config.targets.begin(), config.targets.end(), package_name) != config.targets.end();
 }

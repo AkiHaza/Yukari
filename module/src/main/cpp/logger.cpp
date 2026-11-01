@@ -2,28 +2,21 @@
 
 #include <android/log.h>
 #include <cstdarg>
-#include <cstdio>
 
 namespace {
 constexpr const char *kTag = "Yukari";
-
-void vlog(int prio, const char *fmt, va_list ap) {
-    char buffer[1024]{};
-    std::vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    __android_log_print(prio, kTag, "%s", buffer);
-}
 } // namespace
 
 void log_info(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vlog(ANDROID_LOG_INFO, fmt, ap);
+    __android_log_vprint(ANDROID_LOG_INFO, kTag, fmt, ap);
     va_end(ap);
 }
 
 void log_error(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    vlog(ANDROID_LOG_ERROR, fmt, ap);
+    __android_log_vprint(ANDROID_LOG_ERROR, kTag, fmt, ap);
     va_end(ap);
 }

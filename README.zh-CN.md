@@ -30,6 +30,10 @@ Zygisk 模块，用于隐藏指定目标应用的自定义 ROM 服务信号。
 
 请求/回复过滤使用等长占位符替换，不改变 Parcel 大小。
 
+服务名直接就地匹配，无需构造临时字符串。未命中隐藏服务的回复保留原始
+Binder 缓冲区；命中的回复使用按需增长、可复用的线程本地缓冲区，上限仍为
+256 KiB。释放过滤后的回复时，也会将原始缓冲区归还 Binder 驱动。
+
 ### 配置
 
 ```json
@@ -46,4 +50,10 @@ Zygisk 模块，用于隐藏指定目标应用的自定义 ROM 服务信号。
 ```bash
 gradle :module:assembleRelease
 bash scripts/package.sh
+```
+
+可在具有 C++20 编译器的 Linux 环境运行 native 回归测试：
+
+```bash
+bash tests/native/run.sh
 ```

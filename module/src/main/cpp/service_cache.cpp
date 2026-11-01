@@ -1,8 +1,6 @@
 #include "service_cache.h"
 #include "service_match.h"
 
-#include <string>
-
 void clear_cache(JNIEnv *env) {
     if (!env) return;
 
@@ -38,7 +36,7 @@ void clear_cache(JNIEnv *env) {
         if (!key) continue;
         const char *raw = env->GetStringUTFChars(key, nullptr);
         if (raw) {
-            if (hide_service(std::string(raw))) {
+            if (hide_service(raw)) {
                 env->CallObjectMethod(cache, remove, key);
             }
             env->ReleaseStringUTFChars(key, raw);

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+build_dir=$(mktemp -d)
+trap 'rm -rf -- "$build_dir"' EXIT
+read -r -a extra_cxxflags <<< "${CXXFLAGS:-}"
+read -r -a extra_ldflags <<< "${LDFLAGS:-}"
+
+"${CXX:-g++}" -std=c++20 -O2 -Wall -Wextra -Werror -pthread \
+    "${extra_cxxflags[@]}" \
+    -I"$root/tests/native/include" -I"$root/module/src/main/cpp" \
+    "$root/tests/native/binder_test.cpp" \
+    "$root/module/src/main/cpp/service_match.cpp" \
+    -Wl,--wrap=malloc -Wl,--wrap=realloc -Wl,--wrap=free \
+    "${extra_ldflags[@]}" \
+    -o "$build_dir/binder_test"
+"$build_dir/binder_test"

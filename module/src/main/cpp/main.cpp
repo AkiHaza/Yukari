@@ -6,6 +6,7 @@
 
 #include <jni.h>
 #include <string>
+#include <vector>
 
 namespace {
 YukariConfig g_config;
@@ -51,6 +52,10 @@ public:
         clear_cache(env_);
         install_hooks(api_);
         log_info("enabled for %s", g_package_name.c_str());
+
+        // These inputs are only needed while specializing this app process.
+        std::vector<std::string>{}.swap(g_config.targets);
+        std::string{}.swap(g_package_name);
     }
 
 private:

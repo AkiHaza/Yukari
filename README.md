@@ -30,6 +30,11 @@ Users configure target applications only. The module does not stop or unregister
 
 Request/reply filtering uses same-length placeholders instead of changing Parcel size.
 
+Service names are matched in place without temporary strings. Replies without
+hidden services retain their original Binder buffers; matching replies use a
+reusable thread-local buffer that grows on demand, up to 256 KiB. Releasing a
+filtered reply also returns its original buffer to the Binder driver.
+
 ### Configuration
 
 ```json
@@ -46,4 +51,10 @@ Request/reply filtering uses same-length placeholders instead of changing Parcel
 ```bash
 gradle :module:assembleRelease
 bash scripts/package.sh
+```
+
+Native regression tests can run on Linux with a C++20 compiler:
+
+```bash
+bash tests/native/run.sh
 ```

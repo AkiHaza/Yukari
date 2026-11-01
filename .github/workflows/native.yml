@@ -40,6 +40,9 @@ jobs:
           echo "Version: $(grep '^version=' module/module.prop)"
           cat module/module.prop
 
+      - name: Test native filtering
+        run: bash tests/native/run.sh
+
       - name: Build native library
         run: gradle :module:assembleRelease
 

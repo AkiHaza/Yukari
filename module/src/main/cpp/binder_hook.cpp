@@ -8,7 +8,6 @@
 #include <cstring>
 #include <linux/android/binder.h>
 #include <pthread.h>
-#include <string>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/sysmacros.h>
@@ -40,14 +39,15 @@ bool g_hook_installed = false;
 // transaction to handle 0 (servicemanager).
 thread_local bool g_pending_sm_reply = false;
 
-// --- Lazy Buffer Management (Optimized Memory Usage) ---
-// Instead of allocating 256KB per thread upfront, we allocate on demand
-// and clean up automatically when the thread exits using pthread_key.
-thread_local unsigned char *g_swap_buf = nullptr; // Allocated on first use
+// Allocate only for replies that actually need filtering, growing to the
+// smallest power-of-two capacity that fits. Reuse until the thread exits.
+thread_local unsigned char *g_swap_buf = nullptr;
+thread_local size_t g_swap_capacity = 0;
 
 // pthread_key destructor: automatically frees the buffer when thread exits
 pthread_key_t g_buf_key;
 pthread_once_t g_buf_key_once = PTHREAD_ONCE_INIT;
+bool g_buf_key_valid = false;
 
 void buf_destructor(void *buf) {
     if (buf) {
@@ -56,24 +56,33 @@ void buf_destructor(void *buf) {
 }
 
 void buf_key_init() {
-    pthread_key_create(&g_buf_key, buf_destructor);
+    g_buf_key_valid = pthread_key_create(&g_buf_key, buf_destructor) == 0;
 }
 
 // Returns a thread-local buffer, allocating it if necessary.
 // Registered with pthread_key so it's freed on thread exit.
-unsigned char *get_swap_buf() {
-    if (!g_swap_buf) {
-        pthread_once(&g_buf_key_once, buf_key_init);
-        g_swap_buf = static_cast<unsigned char *>(malloc(MAX_REPLY_BUF));
-        if (g_swap_buf) {
-            pthread_setspecific(g_buf_key, g_swap_buf);
-        }
+unsigned char *get_swap_buf(size_t required) {
+    if (required <= g_swap_capacity) return g_swap_buf;
+    pthread_once(&g_buf_key_once, buf_key_init);
+    if (!g_buf_key_valid) return nullptr;
+
+    size_t capacity = g_swap_capacity ? g_swap_capacity : 256;
+    while (capacity < required) capacity *= 2;
+    auto *buf = static_cast<unsigned char *>(malloc(capacity));
+    if (!buf) return nullptr;
+    if (pthread_setspecific(g_buf_key, buf) != 0) {
+        free(buf);
+        return nullptr;
     }
+    free(g_swap_buf);
+    g_swap_buf = buf;
+    g_swap_capacity = capacity;
     return g_swap_buf;
 }
 
 // Track the active swap buffer address to intercept BC_FREE_BUFFER
 thread_local void *g_active_swap_ptr = nullptr;
+thread_local binder_uintptr_t g_original_reply_buffer = 0;
 
 struct binder_transaction_data_sg_local {
     binder_transaction_data transaction_data;
@@ -87,16 +96,6 @@ struct ElfMappingId {
 
 size_t align4(size_t value) { return (value + 3u) & ~static_cast<size_t>(3u); }
 size_t align8(size_t value) { return (value + 7u) & ~static_cast<size_t>(7u); }
-
-std::string to_ascii(const char16_t *chars, int32_t len) {
-    std::string ascii;
-    if (!chars || len <= 0 || len > 512) return ascii;
-    ascii.reserve(static_cast<size_t>(len));
-    for (int32_t i = 0; i < len; ++i) {
-        ascii.push_back(chars[i] <= 0x7f ? static_cast<char>(chars[i]) : '?');
-    }
-    return ascii;
-}
 
 bool is_parcel_str16(const uint8_t *parcel, size_t size, size_t off, int32_t len) {
     if (!parcel || (off & 0x3u) != 0 || len <= 0 || len > 512) return false;
@@ -123,38 +122,41 @@ void overwrite_utf16(char16_t *chars, int32_t len) {
     for (int32_t i = 0; i < len; ++i) chars[i] = u'_';
 }
 
-size_t process_string16(uint8_t *parcel, size_t size, size_t off, bool &hit) {
-    if (off + sizeof(int32_t) > size) return 0;
-    int32_t len = 0;
+bool matches_string16(const uint8_t *parcel, size_t size, size_t off, int32_t &len) {
+    if (off + sizeof(int32_t) > size) return false;
     std::memcpy(&len, parcel + off, sizeof(len));
-    if (!is_parcel_str16(parcel, size, off, len)) return 0;
+    if (!is_parcel_str16(parcel, size, off, len)) return false;
+    const auto *chars = reinterpret_cast<const char16_t *>(parcel + off + sizeof(int32_t));
+    return hide_service(std::u16string_view(chars, static_cast<size_t>(len)));
+}
 
-    const size_t str_off = off + sizeof(int32_t);
-    const size_t bytes = static_cast<size_t>(len) * sizeof(char16_t);
-    const size_t terminator_off = str_off + bytes;
-    const size_t next_off = align4(terminator_off + sizeof(char16_t));
-
-    auto *chars = reinterpret_cast<char16_t *>(parcel + str_off);
-    const std::string value = to_ascii(chars, len);
-    if (hide_service(value)) {
-        overwrite_utf16(chars, len);
-        hit = true;
-        log_info("scrubbed service string in SM parcel: %s", value.c_str());
+// Read-only preflight: clean replies keep their original Binder buffer and
+// require neither a userspace copy nor a thread-local allocation.
+size_t find_hidden_string16(const uint8_t *parcel, size_t size) {
+    for (size_t off = 0; off + sizeof(int32_t) <= size; off += sizeof(uint32_t)) {
+        int32_t len = 0;
+        if (matches_string16(parcel, size, off, len)) return off;
     }
-    return next_off - off;
+    return size;
 }
 
 // Scan a Parcel for String16 values containing ROM keywords. The same parser
 // is used for requests and replies: request layouts have gained extra header
 // fields across Android releases, while the string representation is stable.
-void scan_sm_parcel_for_strings(uint8_t *parcel, size_t size) {
+void scan_sm_parcel_for_strings(uint8_t *parcel, size_t size, size_t start = 0) {
     if (!parcel || size < sizeof(int32_t)) return;
     int total_hits = 0;
 
-    for (size_t off = 0; off + sizeof(int32_t) <= size; off += sizeof(uint32_t)) {
-        bool hit = false;
-        process_string16(parcel, size, off, hit);
-        if (hit) ++total_hits;
+    for (size_t off = start; off + sizeof(int32_t) <= size; off += sizeof(uint32_t)) {
+        int32_t len = 0;
+        if (!matches_string16(parcel, size, off, len)) continue;
+        auto *chars = reinterpret_cast<char16_t *>(parcel + off + sizeof(int32_t));
+        char value[513];
+        for (int32_t i = 0; i < len; ++i) value[i] = static_cast<char>(chars[i]);
+        value[len] = '\0';
+        overwrite_utf16(chars, len);
+        ++total_hits;
+        log_info("scrubbed service string in SM parcel: %s", value);
     }
 
     if (total_hits > 0) {
@@ -184,11 +186,8 @@ bool swap_reply_buffer(binder_transaction_data *txn) {
 
     const size_t data_size = static_cast<size_t>(txn->data_size);
     const size_t offsets_size = static_cast<size_t>(txn->offsets_size);
-    const size_t offsets_off = align8(data_size);
-    const size_t copy_size = offsets_off + offsets_size;
-
-    if (copy_size > MAX_REPLY_BUF) {
-        log_info("swap: reply too large (%zu), skip", copy_size);
+    if (data_size > MAX_REPLY_BUF || offsets_size > MAX_REPLY_BUF - align8(data_size)) {
+        log_info("swap: reply too large (%zu data, %zu offsets), skip", data_size, offsets_size);
         return false;
     }
     if (g_active_swap_ptr != nullptr) {
@@ -196,19 +195,26 @@ bool swap_reply_buffer(binder_transaction_data *txn) {
         return false;
     }
 
-    unsigned char *buf = get_swap_buf();
+    const auto *original = reinterpret_cast<const uint8_t *>(txn->data.ptr.buffer);
+    const size_t first_hit = find_hidden_string16(original, data_size);
+    if (first_hit == data_size) return false;
+
+    const size_t offsets_off = align8(data_size);
+    const size_t copy_size = offsets_off + offsets_size;
+    unsigned char *buf = get_swap_buf(copy_size);
     if (!buf) {
         log_error("swap: failed to allocate swap buffer");
         return false;
     }
 
-    std::memcpy(buf, reinterpret_cast<const void *>(txn->data.ptr.buffer), data_size);
+    std::memcpy(buf, original, data_size);
     if (offsets_size > 0 && txn->data.ptr.offsets != 0) {
         std::memcpy(buf + offsets_off, reinterpret_cast<const void *>(txn->data.ptr.offsets), offsets_size);
     }
 
-    scan_sm_parcel_for_strings(buf, data_size);
+    scan_sm_parcel_for_strings(buf, data_size, first_hit);
 
+    g_original_reply_buffer = txn->data.ptr.buffer;
     txn->data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(buf);
     if (offsets_size > 0 && txn->data.ptr.offsets != 0) {
         txn->data.ptr.offsets = reinterpret_cast<binder_uintptr_t>(buf + offsets_off);
@@ -254,7 +260,10 @@ void process_write(binder_write_read *bwr) {
             if (g_active_swap_ptr != nullptr &&
                 *buf_ptr == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
                 g_active_swap_ptr = nullptr;
-                *buf_ptr = 0;
+                // The kernel owns the original reply buffer, not the swap.
+                // Return its actual address so the driver can release it.
+                *buf_ptr = g_original_reply_buffer;
+                g_original_reply_buffer = 0;
                 log_info("swap: intercepted BC_FREE_BUFFER for swap buffer");
             }
             ptr += sizeof(binder_uintptr_t);
@@ -314,7 +323,7 @@ int hook_ioctl(int fd, unsigned long request, void *arg) {
     auto *bwr = reinterpret_cast<binder_write_read *>(arg);
     process_write(bwr);
     const int ret = g_original_ioctl ? g_original_ioctl(fd, request, arg) : -1;
-    if (ret == 0) process_read(bwr);
+    if (ret == 0 && g_pending_sm_reply) process_read(bwr);
     return ret;
 }
 
@@ -339,8 +348,7 @@ std::vector<ElfMappingId> find_mappings() {
         const int fields = std::sscanf(line, "%llx-%llx %4s %llx %x:%x %llu %511s", &begin, &end,
                                        perms, &offset, &major_id, &minor_id, &inode, path);
         if (fields < 8 || inode == 0) continue;
-        const std::string pathname = path;
-        if (pathname.find("/libbinder.so") == std::string::npos) continue;
+        if (!std::strstr(path, "/libbinder.so")) continue;
 
         const dev_t dev = makedev(major_id, minor_id);
         const auto ino = static_cast<ino_t>(inode);

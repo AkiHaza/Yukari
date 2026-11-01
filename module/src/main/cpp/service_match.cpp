@@ -1,41 +1,57 @@
 #include "service_match.h"
 
-#include <cctype>
-#include <string>
-
 namespace {
-constexpr const char *kKeywords[] = {
-    "lineage",
-    "crdroid",
-    "aospa",
-    "pixelexperience",
-    "omnirom",
-    "protonaosp",
-};
+template <typename Char>
+Char ascii_lower(Char c) {
+    return c >= 'A' && c <= 'Z' ? static_cast<Char>(c + ('a' - 'A')) : c;
+}
 
-constexpr const char *kExactServices[] = {
-    "profile",
-};
-
-std::string to_lower(const std::string &input) {
-    std::string out;
-    out.reserve(input.size());
-    for (unsigned char c : input) {
-        out.push_back(static_cast<char>(std::tolower(c)));
+// The caller has already matched the first character. Compare in place so
+// neither String8 nor String16 names need a temporary lowercase string.
+template <typename Char>
+bool matches_at(std::basic_string_view<Char> name, size_t off, std::string_view keyword) {
+    if (name.size() - off < keyword.size()) return false;
+    for (size_t i = 1; i < keyword.size(); ++i) {
+        if (ascii_lower(name[off + i]) != keyword[i]) return false;
     }
-    return out;
+    return true;
+}
+
+template <typename Char>
+bool matches_service(std::basic_string_view<Char> name) {
+    if (name.size() == 7 && ascii_lower(name.front()) == 'p' &&
+        matches_at(name, 0, "profile")) {
+        return true;
+    }
+
+    for (size_t off = 0; off < name.size(); ++off) {
+        switch (ascii_lower(name[off])) {
+            case 'l':
+                if (matches_at(name, off, "lineage")) return true;
+                break;
+            case 'c':
+                if (matches_at(name, off, "crdroid")) return true;
+                break;
+            case 'a':
+                if (matches_at(name, off, "aospa")) return true;
+                break;
+            case 'p':
+                if (matches_at(name, off, "pixelexperience") ||
+                    matches_at(name, off, "protonaosp")) return true;
+                break;
+            case 'o':
+                if (matches_at(name, off, "omnirom")) return true;
+                break;
+        }
+    }
+    return false;
 }
 } // namespace
 
-bool hide_service(const std::string &service_name) {
-    const std::string lower = to_lower(service_name);
+bool hide_service(std::string_view service_name) {
+    return matches_service(service_name);
+}
 
-    for (const char *service : kExactServices) {
-        if (lower == service) return true;
-    }
-
-    for (const char *keyword : kKeywords) {
-        if (lower.find(keyword) != std::string::npos) return true;
-    }
-    return false;
+bool hide_service(std::u16string_view service_name) {
+    return matches_service(service_name);
 }
