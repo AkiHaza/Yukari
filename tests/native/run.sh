@@ -53,3 +53,9 @@ fi
     "$root/tests/native/feature_test.cpp" "${extra_ldflags[@]}" \
     -o "$build_dir/feature_jni_test"
 "$build_dir/feature_jni_test"
+
+"${CXX:-g++}" -std=c++20 -O2 -Wall -Wextra -Werror \
+    "${extra_cxxflags[@]}" -I"$root/tests/native/include" -I"$root/module/src/main/cpp" \
+    "$root/tests/native/resource_test.cpp" "${extra_ldflags[@]}" \
+    -o "$build_dir/resource_test"
+"$build_dir/resource_test"

@@ -44,6 +44,7 @@ filtered reply also returns its original buffer to the Binder driver.
 {
   "enabled": true,
   "hide_features": false,
+  "hide_resources": false,
   "targets": [
     "com.example.app"
   ]
@@ -57,6 +58,13 @@ separately. Missing JNI methods or unsupported lifecycle ABIs leave the affected
 capability visible. This covers Java calls and the initial enumeration reply;
 deferred ParceledListSlice chunks, unknown reply headers, and explicit Parcel
 repositioning are conservatively left visible. `action.sh` preserves this option.
+
+`hide_resources` independently hides `lineageos.platform` resource identifiers,
+single values and name lookups. Resource IDs are filtered only after the current
+AssetManager confirms their package mapping; an unrelated `0x3f` package remains
+untouched. Missing mappings leave ID access visible. Arrays, themes and package
+map enumeration are outside this channel. This option also defaults to false and
+is preserved by `action.sh`.
 
 ### Build
 

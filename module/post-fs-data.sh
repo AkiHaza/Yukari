@@ -7,6 +7,7 @@ if [ ! -f "$CONFIG" ]; then
 {
   "enabled": true,
   "hide_features": false,
+  "hide_resources": false,
   "targets": []
 }
 EOF

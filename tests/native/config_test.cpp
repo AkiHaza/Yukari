@@ -10,6 +10,7 @@
 int main() {
     YukariConfig config{true, {"com.example.app"}};
     CHECK(!config.hide_features);
+    CHECK(!config.hide_resources);
     CHECK(is_target(config, "com.example.app"));
     CHECK(is_target(config, "com.example.app:remote"));
     CHECK(is_target(config, "com.example.app:worker"));

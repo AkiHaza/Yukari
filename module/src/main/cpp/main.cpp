@@ -2,6 +2,7 @@
 #include "config.h"
 #include "feature_hook.h"
 #include "logger.h"
+#include "resource_hook.h"
 #include "service_cache.h"
 #include "zygisk.hpp"
 
@@ -73,6 +74,13 @@ public:
             }
         }
         log_info("matched target %s", g_package_name.c_str());
+        if (g_config.hide_resources) {
+            try {
+                install_resource_hooks(env_, api_);
+            } catch (...) {
+                log_error("resource hook setup failed; resources stay visible");
+            }
+        }
     }
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *) override {
