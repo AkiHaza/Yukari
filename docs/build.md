@@ -56,7 +56,9 @@ ELF 验证要求 AArch64 动态库且仅导出 Zygisk 入口；ZIP 验证检查�
 
 每次统一入口运行创建 `out/diagnostics/<模式>.<随机ID>/`，记录源码提交、
 请求 ref/SHA、工作区状态及各阶段日志。失败时输出对应目录，旧日志不会冒充
-本次阶段日志。Android 任务另外上传 AGP/CMake 原始诊断（如果已生成）。
+本次阶段日志。GitHub Actions 只上传一个模块产物，不再上传诊断、APK 或编译中间文件。
+上传时使用已验证模块包的解包内容，使下载的 ZIP 根目录直接包含 `module.prop`
+和 `zygisk/`，可直接刷入，无需再解压取出内层 ZIP。构建排错信息可在任务日志查看。
 
 ## GitHub Actions
 

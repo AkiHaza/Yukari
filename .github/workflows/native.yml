@@ -30,15 +30,6 @@ jobs:
       - name: Run host validation
         run: bash scripts/build.sh test
 
-      - name: Upload host diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Yukari-host-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
-          path: out/diagnostics/
-          if-no-files-found: ignore
-          retention-days: 7
-
   android-build:
     name: Android release and module package
     needs: host-tests
@@ -59,24 +50,13 @@ jobs:
       - name: Prepare SDK, compile and package
         run: bash scripts/build.sh android
 
+      - name: Prepare flashable module artifact
+        run: python3 -m zipfile -e out/Yukari.zip "$RUNNER_TEMP/yukari-module"
+
       - name: Upload Yukari module
         uses: actions/upload-artifact@v4
         with:
           name: Yukari-${{ github.sha }}-${{ github.run_attempt }}
-          path: out/Yukari.zip
+          path: ${{ runner.temp }}/yukari-module/
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload Android diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Yukari-android-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
-          path: |
-            out/diagnostics/
-            module/build/outputs/
-            module/build/intermediates/cxx/
-            module/.cxx/
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 7
