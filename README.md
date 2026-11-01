@@ -27,7 +27,9 @@ Users configure target applications and optional filtering channels. The module 
   an explicit process target remains an exact match. System app IDs and protected
   framework packages are excluded, including their private processes.
 - Java `ServiceManager.sCache` entries containing fixed ROM keywords are removed.
-- Binder request filtering rewrites matching service lookup names before they reach ServiceManager.
+- Binder request filtering verifies the ServiceManager interface and rewrites
+  only the first service-name argument in a private copy. Original request
+  bytes and write commands remain unchanged, including partial-write retries.
 - Binder reply filtering uses a safe buffer swap mechanism to scan and filter all ServiceManager replies (including `listServices` and `getServiceDebugInfo`). This prevents apps from enumerating hidden services.
 - Binder interception uses Zygisk's standard PLT hook API instead of patching libc inline.
 
@@ -74,8 +76,19 @@ gradle :module:assembleRelease
 bash scripts/package.sh
 ```
 
-Native regression tests can run on Linux with a C++20 compiler:
+Native regression tests run on Linux/WSL with a C++20 compiler, CMake, make,
+binutils and JDK JNI headers; see [test prerequisites](tests/native/README.md):
 
 ```bash
 bash tests/native/run.sh
 ```
+
+Channels install independently before specialization. After specialization,
+Yukari reports `services`, `cache`, `feature_query`, `feature_enum` and `resources`
+as `off`, `ready`, `partial` (resources only), or `unavailable`. These are setup
+states, not proof that a device check passed. Cache failure does not disable
+the other installed channels.
+
+For read-only loading diagnostics run
+`bash scripts/diagnose_device.sh package.name [adb-serial]`. Follow the
+[device acceptance checklist](tests/device/README.md) to verify real API behavior.

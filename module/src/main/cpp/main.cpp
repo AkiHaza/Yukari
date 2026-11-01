@@ -14,6 +14,11 @@ namespace {
 YukariConfig g_config;
 std::string g_package_name;
 bool g_enabled_for_process = false;
+bool g_binder_ready = false;
+
+const char *channel_state(bool requested, bool ready) {
+    return !requested ? "off" : ready ? "ready" : "unavailable";
+}
 
 std::string jstr_to_str(JNIEnv *env, jstring value) {
     if (!env || !value) return {};
@@ -49,6 +54,7 @@ public:
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
         g_enabled_for_process = false;
+        g_binder_ready = false;
         g_package_name.clear();
         if (!args) return;
         // appId, rather than the full uid, also protects secondary users'
@@ -66,6 +72,13 @@ public:
 
         g_enabled_for_process = true;
         if (api_) api_->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
+        // Zygisk API calls belong before specialization; individual channel
+        // failures must not prevent the remaining channels from installing.
+        try {
+            g_binder_ready = install_hooks(api_);
+        } catch (...) {
+            log_error("service hook setup failed; services stay visible");
+        }
         if (g_config.hide_features) {
             try {
                 install_feature_hooks(env_, api_);
@@ -85,9 +98,21 @@ public:
 
     void postAppSpecialize(const zygisk::AppSpecializeArgs *) override {
         if (!g_enabled_for_process) return;
-        clear_cache(env_);
-        install_hooks(api_);
-        log_info("enabled for %s", g_package_name.c_str());
+        bool cache_ready = false;
+        try {
+            cache_ready = clear_cache(env_);
+        } catch (...) {
+            log_error("cache cleanup failed; other channels remain active");
+        }
+        const auto feature = feature_hook_status();
+        const auto resource = resource_hook_status();
+        const bool any_resources = resource.modern_methods || resource.legacy_methods;
+        const char *resource_state = !g_config.hide_resources ? "off"
+            : resource.complete() ? "ready" : any_resources ? "partial" : "unavailable";
+        log_info("active process=%s services=%s cache=%s feature_query=%s feature_enum=%s resources=%s",
+                 g_package_name.c_str(), channel_state(true, g_binder_ready),
+                 channel_state(true, cache_ready), channel_state(g_config.hide_features, feature.query),
+                 channel_state(g_config.hide_features, feature.enumeration), resource_state);
 
         // These inputs are only needed while specializing this app process.
         std::vector<std::string>{}.swap(g_config.targets);

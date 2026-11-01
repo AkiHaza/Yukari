@@ -26,7 +26,8 @@ Zygisk 模块，用于隐藏指定目标应用的自定义 ROM 服务信号。
 - 包名规则同时覆盖 `com.example.app:remote` 等私有子进程；包含冒号的进程规则
   仍为精确匹配。系统 appId 和受保护框架包（含其子进程）不会注入。
 - 移除 Java `ServiceManager.sCache` 中包含固定 ROM 关键词的条目。
-- Binder 请求过滤：在请求到达 ServiceManager 之前，重写匹配的服务查询名。
+- Binder 请求过滤：验证 ServiceManager 接口后，仅在私有副本中改写首个服务名
+  参数。原始请求和写命令保持不变，部分写入重试也不会污染调用者的数据。
 - Binder 回复过滤：使用安全的缓冲区交换机制，扫描并过滤所有 ServiceManager 回复（包括 `listServices` 和 `getServiceDebugInfo`）。阻止应用枚举隐藏的服务。
 - Binder 拦截使用 Zygisk 的标准 PLT hook API，而非内联修补 libc。
 
@@ -68,8 +69,18 @@ gradle :module:assembleRelease
 bash scripts/package.sh
 ```
 
-可在具有 C++20 编译器的 Linux 环境运行 native 回归测试：
+可在具有 C++20 编译器、CMake、make、binutils 和 JDK JNI 头文件的 Linux/WSL
+环境运行回归测试，详见[测试依赖与覆盖范围](tests/native/README.md)：
 
 ```bash
 bash tests/native/run.sh
 ```
+
+各通道在特化前独立安装，特化后日志分别报告 `services`、`cache`、
+`feature_query`、`feature_enum`、`resources` 的 `off`、`ready`、`partial`
+（仅资源）或 `unavailable` 状态。状态代表安装结果，不代表已通过设备检测；
+缓存清理失败也不会关闭其他已安装通道。
+
+可运行 `bash scripts/diagnose_device.sh 包名 [adb序列号]` 收集只读加载诊断。
+真实 API 行为按[设备验收清单](tests/device/README.md)逐项验证；宿主测试与
+JNI 模拟测试不能替代 Android ART、Zygisk 和驱动上的实测。

@@ -59,3 +59,7 @@ fi
     "$root/tests/native/resource_test.cpp" "${extra_ldflags[@]}" \
     -o "$build_dir/resource_test"
 "$build_dir/resource_test"
+
+JAVA_HOME="$jni_home" bash "$root/tests/native/production_build.sh"
+bash -n "$root/module/action.sh" "$root/module/post-fs-data.sh" \
+    "$root/scripts/diagnose_device.sh" "$root/scripts/package.sh"

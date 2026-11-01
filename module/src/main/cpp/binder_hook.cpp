@@ -486,17 +486,17 @@ std::vector<ElfMappingId> find_mappings() {
 }
 } // namespace
 
-void install_hooks(zygisk::Api *api) {
-    if (g_hook_installed) return;
+bool install_hooks(zygisk::Api *api) {
+    if (g_hook_installed) return true;
     if (!api) {
         log_error("zygisk api is null; cannot install binder hook");
-        return;
+        return false;
     }
 
     const auto mappings = find_mappings();
     if (mappings.empty()) {
         log_error("libbinder mapping not found; cannot install ioctl hook");
-        return;
+        return false;
     }
 
     for (const auto &mapping : mappings) {
@@ -505,9 +505,10 @@ void install_hooks(zygisk::Api *api) {
     }
     if (!api->pltHookCommit() || !g_original_ioctl) {
         log_error("zygisk plt ioctl hook failed");
-        return;
+        return false;
     }
 
     g_hook_installed = true;
     log_info("zygisk plt ioctl hook installed for %zu libbinder mapping(s)", mappings.size());
+    return true;
 }
