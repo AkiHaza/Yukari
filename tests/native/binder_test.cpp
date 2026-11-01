@@ -215,27 +215,129 @@ binder_transaction_data transaction(std::vector<uint8_t> &data) {
     return txn;
 }
 
-void test_request_filtering() {
-    auto data = parcel_for(u"Lineage");
+std::vector<uint8_t> request_for(std::u16string_view name, size_t prefix = 0) {
+    auto data = parcel_for(u"android.os.IServiceManager", prefix);
+    put_string(data, data.size(), name);
+    return data;
+}
+
+std::vector<uint8_t> transaction_command(const binder_transaction_data &txn,
+                                         uint32_t command = BC_TRANSACTION) {
+    std::vector<uint8_t> stream(sizeof(command) + _IOC_SIZE(command));
+    std::memcpy(stream.data(), &command, sizeof(command));
+    std::memcpy(stream.data() + sizeof(command), &txn, sizeof(txn));
+    return stream;
+}
+
+binder_transaction_data command_transaction(const uint8_t *stream, size_t offset = 4) {
+    binder_transaction_data txn;
+    std::memcpy(&txn, stream + offset, sizeof(txn));
+    return txn;
+}
+
+binder_write_read write_stream(std::vector<uint8_t> &stream) {
+    binder_write_read bwr{};
+    bwr.write_buffer = reinterpret_cast<binder_uintptr_t>(stream.data());
+    bwr.write_size = stream.size();
+    return bwr;
+}
+
+void reset_contexts() {
+    g_pending_sm_reply = false;
+    g_reply_contexts = 0;
+    g_reply_depth = 0;
+    g_reply_overflow = 0;
+}
+
+void check_request_unchanged(std::vector<uint8_t> &data, uint32_t handle = 0, uint32_t flags = 0) {
     const auto original = data;
     auto txn = transaction(data);
-    txn.target.handle = 1;
-    g_pending_sm_reply = false;
-    process_transaction(txn);
+    txn.target.handle = handle;
+    txn.flags = flags;
+    auto stream = transaction_command(txn);
+    const auto original_stream = stream;
+    auto bwr = write_stream(stream);
+    allocation_test::calls = 0;
+    allocation_test::enabled = true;
+    {
+        PrivateWrite copy(bwr);
+        CHECK(prepare_write(bwr, copy));
+        CHECK(copy.commands() == nullptr);
+    }
+    allocation_test::enabled = false;
+    CHECK(allocation_test::calls == 0);
+    CHECK(stream == original_stream);
     CHECK(data == original);
-    CHECK(!g_pending_sm_reply);
-    txn.target.handle = 0;
-    txn.flags = TF_ONE_WAY;
-    process_transaction(txn);
+}
+
+void test_request_filtering() {
+    for (size_t prefix : {size_t{0}, size_t{4}, size_t{8}, size_t{12}, size_t{16}}) {
+        auto data = request_for(u"LiNeAgE", prefix);
+        const size_t trailing = data.size();
+        put_string(data, trailing, u"lineage");
+        const auto original = data;
+        auto txn = transaction(data);
+        // Deliberately avoid a transaction-code allowlist: lookup variants
+        // such as waitForService/isDeclared must retain this protection.
+        txn.code = 1001;
+        for (uint32_t command : {uint32_t{BC_TRANSACTION}, uint32_t{BC_TRANSACTION_SG}}) {
+            auto stream = transaction_command(txn, command);
+            const auto original_stream = stream;
+            auto bwr = write_stream(stream);
+            PrivateWrite copy(bwr);
+            CHECK(prepare_write(bwr, copy));
+            CHECK(copy.commands() != nullptr);
+            const auto sent = command_transaction(copy.commands());
+            CHECK(sent.code == txn.code);
+            CHECK(sent.data.ptr.buffer != txn.data.ptr.buffer);
+            CHECK(sent.data_size == txn.data_size);
+            CHECK(sent.offsets_size == txn.offsets_size);
+            auto expected = original;
+            put_string(expected, service_name_position(txn), u"_______");
+            CHECK(std::memcmp(reinterpret_cast<const void *>(sent.data.ptr.buffer),
+                              expected.data(), expected.size()) == 0);
+            CHECK(stream == original_stream);
+            CHECK(data == original);
+        }
+    }
+    auto data = request_for(u"lineage");
+    check_request_unchanged(data, 1);
+    check_request_unchanged(data, 0, TF_ONE_WAY);
+    auto ordinary = request_for(u"activity");
+    put_string(ordinary, ordinary.size(), u"lineage");
+    check_request_unchanged(ordinary);
+    auto wrong_interface = parcel_for(u"android.os.IUnknownManager");
+    put_string(wrong_interface, wrong_interface.size(), u"lineage");
+    check_request_unchanged(wrong_interface);
+    auto wrong_header = request_for(u"lineage", 20);
+    check_request_unchanged(wrong_header);
+    auto malformed = data;
+    malformed[4 + std::u16string_view(u"android.os.IServiceManager").size() * 2] = 1;
+    check_request_unchanged(malformed);
+    for (size_t size = 0; size < data.size(); ++size) {
+        auto truncated = std::vector<uint8_t>(data.begin(), data.begin() + size);
+        check_request_unchanged(truncated);
+    }
+    auto oversized = data;
+    oversized.resize(MAX_REPLY_BUF + 4);
+    check_request_unchanged(oversized);
+
+    const auto original = data;
+    auto stream = transaction_command(transaction(data));
+    const auto original_stream = stream;
+    auto bwr = write_stream(stream);
+    allocation_test::enabled = true;
+    allocation_test::fail = true;
+    {
+        PrivateWrite copy(bwr);
+        CHECK(prepare_write(bwr, copy));
+        const auto sent = command_transaction(copy.commands() ? copy.commands() : stream.data());
+        CHECK(sent.data.ptr.buffer == reinterpret_cast<binder_uintptr_t>(data.data()));
+    }
+    allocation_test::enabled = false;
+    allocation_test::fail = false;
     CHECK(data == original);
-    CHECK(!g_pending_sm_reply);
-    txn.flags = 0;
-    process_transaction(txn);
-    auto expected = original;
-    reference_scan(expected);
-    CHECK(data == expected);
-    CHECK(g_pending_sm_reply);
-    g_pending_sm_reply = false;
+    CHECK(stream == original_stream);
 }
 
 void release_reply(binder_uintptr_t swap, binder_uintptr_t original) {
@@ -249,10 +351,144 @@ void release_reply(binder_uintptr_t swap, binder_uintptr_t original) {
     binder_write_read bwr{};
     bwr.write_buffer = reinterpret_cast<binder_uintptr_t>(command);
     bwr.write_size = 4 + sizeof(swap);
-    process_write(&bwr);
+    PrivateWrite copy(bwr);
+    CHECK(prepare_write(bwr, copy));
+    CHECK(copy.commands() != nullptr);
     binder_uintptr_t restored;
-    std::memcpy(&restored, command + 4, sizeof(restored));
+    std::memcpy(&restored, copy.commands() + 4, sizeof(restored));
     CHECK(restored == original);
+    std::memcpy(&restored, command + 4, sizeof(restored));
+    CHECK(restored == swap);
+    CHECK(g_active_swap_ptr != nullptr);
+    consumed_write(bwr, bwr.write_size);
+}
+
+const std::vector<uint8_t> *ioctl_expected_data = nullptr;
+binder_uintptr_t ioctl_original_data = 0;
+size_t ioctl_payload_offset = 4;
+bool ioctl_expect_rewrite = false;
+bool ioctl_check_free = false;
+binder_uintptr_t ioctl_expected_free = 0;
+binder_size_t ioctl_consumed = 0;
+int ioctl_result = 0;
+int ioctl_errno = 0;
+size_t ioctl_calls = 0;
+
+int inspect_ioctl(int, unsigned long request, void *arg) {
+    CHECK(request == BINDER_WRITE_READ);
+    ++ioctl_calls;
+    auto *bwr = static_cast<binder_write_read *>(arg);
+    const auto *stream = reinterpret_cast<const uint8_t *>(bwr->write_buffer);
+    if (ioctl_expected_data) {
+        const auto txn = command_transaction(stream, ioctl_payload_offset);
+        CHECK(txn.data_size == ioctl_expected_data->size());
+        CHECK((txn.data.ptr.buffer != ioctl_original_data) == ioctl_expect_rewrite);
+        CHECK(std::memcmp(reinterpret_cast<const void *>(txn.data.ptr.buffer),
+                          ioctl_expected_data->data(), ioctl_expected_data->size()) == 0);
+    }
+    if (ioctl_check_free) {
+        binder_uintptr_t buffer = 0;
+        std::memcpy(&buffer, stream + ioctl_payload_offset, sizeof(buffer));
+        CHECK(buffer == ioctl_expected_free);
+    }
+    bwr->write_consumed = ioctl_consumed;
+    errno = ioctl_errno;
+    return ioctl_result;
+}
+
+void test_ioctl_request_lifetime() {
+    reset_contexts();
+    auto data = request_for(u"lineage");
+    put_string(data, data.size(), u"lineage");
+    const auto original = data;
+    auto expected = data;
+    put_string(expected, service_name_position(transaction(data)), u"_______");
+    auto stream = transaction_command(transaction(data));
+    const auto original_stream = stream;
+    auto bwr = write_stream(stream);
+    const auto original_buffer = bwr.write_buffer;
+    g_original_ioctl = inspect_ioctl;
+    ioctl_expected_data = &expected;
+    ioctl_original_data = reinterpret_cast<binder_uintptr_t>(data.data());
+    ioctl_expect_rewrite = true;
+    ioctl_payload_offset = 4;
+    ioctl_consumed = 0;
+    ioctl_result = -1;
+    ioctl_errno = EINTR;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == -1);
+    CHECK(errno == EINTR);
+    CHECK(g_reply_depth == 0);
+    CHECK(!g_pending_sm_reply);
+    CHECK(bwr.write_buffer == original_buffer);
+    CHECK(bwr.write_consumed == 0);
+    CHECK(stream == original_stream);
+    CHECK(data == original);
+    ioctl_result = 0;
+    ioctl_consumed = stream.size();
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == 0);
+    CHECK(g_reply_depth == 1);
+    CHECK(g_pending_sm_reply);
+    CHECK(bwr.write_buffer == original_buffer);
+    CHECK(stream == original_stream);
+    CHECK(data == original);
+
+    reset_contexts();
+    const uint32_t enter = BC_ENTER_LOOPER;
+    auto partial = std::vector<uint8_t>(4 + stream.size());
+    std::memcpy(partial.data(), &enter, 4);
+    std::memcpy(partial.data() + 4, stream.data(), stream.size());
+    const auto original_partial = partial;
+    bwr = write_stream(partial);
+    ioctl_payload_offset = 8;
+    ioctl_consumed = 4;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == 0);
+    CHECK(bwr.write_consumed == 4);
+    CHECK(g_reply_depth == 0);
+    CHECK(partial == original_partial);
+    ioctl_consumed = partial.size();
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == 0);
+    CHECK(g_reply_depth == 1);
+    CHECK(g_pending_sm_reply);
+    CHECK(partial == original_partial);
+    CHECK(data == original);
+
+    // Progress returned together with an error is still authoritative, and
+    // a retry must not register already-consumed transactions a second time.
+    reset_contexts();
+    auto repeated = stream;
+    repeated.insert(repeated.end(), stream.begin(), stream.end());
+    const auto original_repeated = repeated;
+    bwr = write_stream(repeated);
+    ioctl_payload_offset = 4;
+    ioctl_consumed = stream.size();
+    ioctl_result = -1;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == -1);
+    CHECK(g_reply_depth == 1);
+    CHECK(repeated == original_repeated);
+    ioctl_payload_offset = 4 + stream.size();
+    ioctl_consumed = repeated.size();
+    ioctl_result = 0;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == 0);
+    CHECK(g_reply_depth == 2);
+    CHECK(repeated == original_repeated);
+
+    reset_contexts();
+    auto ordinary = request_for(u"activity");
+    stream = transaction_command(transaction(ordinary));
+    bwr = write_stream(stream);
+    ioctl_expected_data = &ordinary;
+    ioctl_original_data = reinterpret_cast<binder_uintptr_t>(ordinary.data());
+    ioctl_expect_rewrite = false;
+    ioctl_payload_offset = 4;
+    ioctl_consumed = stream.size();
+    allocation_test::calls = 0;
+    allocation_test::enabled = true;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == 0);
+    allocation_test::enabled = false;
+    CHECK(allocation_test::calls == 0);
+    reset_contexts();
+    ioctl_expected_data = nullptr;
+    g_original_ioctl = nullptr;
 }
 
 void test_reply_buffers() {
@@ -357,6 +593,137 @@ void test_reply_buffers() {
     CHECK(overflow_txn.data.ptr.buffer == hidden_ptr);
 }
 
+void test_reply_release_retry_and_contexts() {
+    auto hidden = parcel_for(u"lineage");
+    auto txn = transaction(hidden);
+    const auto original = txn.data.ptr.buffer;
+    CHECK(swap_reply_buffer(&txn));
+    const auto swapped = txn.data.ptr.buffer;
+    const uint32_t command = BC_FREE_BUFFER;
+    std::vector<uint8_t> stream(4 + sizeof(swapped));
+    std::memcpy(stream.data(), &command, 4);
+    std::memcpy(stream.data() + 4, &swapped, sizeof(swapped));
+    const auto original_stream = stream;
+    auto bwr = write_stream(stream);
+    ioctl_expected_data = nullptr;
+    ioctl_check_free = true;
+    ioctl_expected_free = original;
+    ioctl_payload_offset = 4;
+    ioctl_consumed = 0;
+    ioctl_result = -1;
+    ioctl_errno = EINTR;
+    g_original_ioctl = inspect_ioctl;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == -1);
+    CHECK(g_active_swap_ptr == reinterpret_cast<void *>(swapped));
+    CHECK(g_original_reply_buffer == original);
+    CHECK(stream == original_stream);
+    ioctl_result = 0;
+    ioctl_consumed = stream.size();
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == 0);
+    CHECK(g_active_swap_ptr == nullptr);
+    CHECK(g_original_reply_buffer == 0);
+    CHECK(stream == original_stream);
+
+    txn = transaction(hidden);
+    CHECK(swap_reply_buffer(&txn));
+    // A large command stream cannot use the inline copy. Failure must leave
+    // the swap tracked and must not send its userspace address to Binder.
+    std::vector<uint8_t> large(512, 0);
+    const uint32_t enter = BC_ENTER_LOOPER;
+    for (size_t off = 0; off < large.size(); off += 4) std::memcpy(large.data() + off, &enter, 4);
+    large.insert(large.end(), original_stream.begin(), original_stream.end());
+    bwr = write_stream(large);
+    const auto previous_calls = ioctl_calls;
+    allocation_test::enabled = true;
+    allocation_test::fail = true;
+    CHECK(hook_ioctl(1, BINDER_WRITE_READ, &bwr) == -1);
+    CHECK(errno == ENOMEM);
+    allocation_test::enabled = false;
+    allocation_test::fail = false;
+    CHECK(ioctl_calls == previous_calls);
+    CHECK(g_active_swap_ptr != nullptr);
+    release_reply(txn.data.ptr.buffer, original);
+    ioctl_check_free = false;
+    g_original_ioctl = nullptr;
+
+    reset_contexts();
+    push_reply_context(true);
+    push_reply_context(false);
+    txn = transaction(hidden);
+    process_reply(&txn);
+    CHECK(txn.data.ptr.buffer == original);
+    CHECK(g_pending_sm_reply);
+    process_reply(&txn);
+    CHECK(txn.data.ptr.buffer != original);
+    CHECK(!g_pending_sm_reply);
+    CHECK(g_reply_depth == 0);
+    release_reply(txn.data.ptr.buffer, original);
+
+    // Non-reply notifications must not prevent the matching reply in the
+    // same read stream from consuming its synchronous call context.
+    push_reply_context(true);
+    txn = transaction(hidden);
+    const uint32_t notification = BR_SPAWN_LOOPER;
+    const uint32_t reply = BR_REPLY;
+    std::vector<uint8_t> incoming(8 + sizeof(txn));
+    std::memcpy(incoming.data(), &notification, 4);
+    std::memcpy(incoming.data() + 4, &reply, 4);
+    std::memcpy(incoming.data() + 8, &txn, sizeof(txn));
+    binder_write_read read{};
+    read.read_buffer = reinterpret_cast<binder_uintptr_t>(incoming.data());
+    read.read_consumed = incoming.size();
+    process_read(&read);
+    txn = command_transaction(incoming.data(), 8);
+    CHECK(txn.data.ptr.buffer != original);
+    CHECK(g_reply_depth == 0);
+    release_reply(txn.data.ptr.buffer, original);
+}
+
+void test_frozen_reply_contexts() {
+    reset_contexts();
+    auto hidden = parcel_for(u"lineage");
+    auto txn = transaction(hidden);
+    const auto original = txn.data.ptr.buffer;
+    const uint32_t frozen = BR_FROZEN_REPLY;
+    const uint32_t reply = BR_REPLY;
+    std::vector<uint8_t> incoming(8 + sizeof(txn));
+    std::memcpy(incoming.data(), &frozen, 4);
+    std::memcpy(incoming.data() + 4, &reply, 4);
+    std::memcpy(incoming.data() + 8, &txn, sizeof(txn));
+    binder_write_read read{};
+    read.read_buffer = reinterpret_cast<binder_uintptr_t>(incoming.data());
+    read.read_consumed = incoming.size();
+    push_reply_context(true);
+    push_reply_context(false);
+    // A failed nested ordinary call must not consume or hide its outer
+    // ServiceManager context. Both terminal responses can share one read.
+    process_read(&read);
+    txn = command_transaction(incoming.data(), 8);
+    CHECK(txn.data.ptr.buffer != original);
+    CHECK(g_reply_depth == 0);
+    CHECK(g_reply_overflow == 0);
+    CHECK(!g_pending_sm_reply);
+    release_reply(txn.data.ptr.buffer, original);
+
+    // With no outer call, a frozen target leaves no stale false frame.
+    push_reply_context(false);
+    read.read_consumed = sizeof(frozen);
+    process_read(&read);
+    CHECK(g_reply_depth == 0);
+    CHECK(g_reply_overflow == 0);
+    CHECK(!g_pending_sm_reply);
+
+    // BR_TRANSACTION_PENDING_FROZEN reports successful one-way queuing;
+    // unlike BR_FROZEN_REPLY, it cannot finish a synchronous context.
+    const uint32_t pending_frozen = _IO('r', 20);
+    std::memcpy(incoming.data(), &pending_frozen, 4);
+    push_reply_context(true);
+    process_read(&read);
+    CHECK(g_reply_depth == 1);
+    CHECK(g_pending_sm_reply);
+    reset_contexts();
+}
+
 void *thread_with_cached_buffer(void *) {
     auto data = parcel_for(u"lineage");
     auto txn = transaction(data);
@@ -382,7 +749,10 @@ int main() {
     test_matching_and_boundaries();
     test_differential_parcels();
     test_request_filtering();
+    test_ioctl_request_lifetime();
     test_reply_buffers();
+    test_reply_release_retry_and_contexts();
+    test_frozen_reply_contexts();
     test_thread_exit_cleanup();
     std::puts("Native regression tests passed (20,000 differential parcels).");
 }

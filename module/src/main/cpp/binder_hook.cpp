@@ -3,6 +3,7 @@
 #include "service_match.h"
 
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,6 +27,12 @@
 #define BC_FREE_BUFFER _IOW('c', 3, binder_uintptr_t)
 #endif
 
+// Frozen targets reject synchronous calls with this terminal reply. Older
+// host/NDK Binder headers may predate the freezer protocol.
+#ifndef BR_FROZEN_REPLY
+#define BR_FROZEN_REPLY _IO('r', 18)
+#endif
+
 // Max reply buffer size for swap. ServiceManager list/debug replies can be
 // larger than 32KB on devices with many registered services.
 #define MAX_REPLY_BUF (256 * 1024)
@@ -35,9 +42,32 @@ using IoctlFn = int (*)(int, unsigned long, void *);
 IoctlFn g_original_ioctl = nullptr;
 bool g_hook_installed = false;
 
-// Thread local: whether the current thread has a pending synchronous
-// transaction to handle 0 (servicemanager).
+// Track nested synchronous calls without allocating in the ioctl path.
 thread_local bool g_pending_sm_reply = false;
+thread_local uint64_t g_reply_contexts = 0;
+thread_local unsigned g_reply_depth = 0;
+thread_local size_t g_reply_overflow = 0;
+
+void push_reply_context(bool service_manager) {
+    if (g_reply_depth < 64 && g_reply_overflow == 0) {
+        const uint64_t bit = uint64_t{1} << g_reply_depth++;
+        if (service_manager) g_reply_contexts |= bit;
+        else g_reply_contexts &= ~bit;
+    } else {
+        ++g_reply_overflow;
+    }
+    g_pending_sm_reply = g_reply_overflow == 0 && g_reply_depth != 0 &&
+                        ((g_reply_contexts >> (g_reply_depth - 1)) & 1u);
+}
+
+bool pop_reply_context() {
+    const bool service_manager = g_pending_sm_reply;
+    if (g_reply_overflow != 0) --g_reply_overflow;
+    else if (g_reply_depth != 0) --g_reply_depth;
+    g_pending_sm_reply = g_reply_overflow == 0 && g_reply_depth != 0 &&
+                        ((g_reply_contexts >> (g_reply_depth - 1)) & 1u);
+    return service_manager;
+}
 
 // Allocate only for replies that actually need filtering, growing to the
 // smallest power-of-two capacity that fits. Reuse until the thread exits.
@@ -140,9 +170,8 @@ size_t find_hidden_string16(const uint8_t *parcel, size_t size) {
     return size;
 }
 
-// Scan a Parcel for String16 values containing ROM keywords. The same parser
-// is used for requests and replies: request layouts have gained extra header
-// fields across Android releases, while the string representation is stable.
+// Replies retain the existing size-preserving String16 scanner. Requests use
+// an exact interface token and only the first argument after that token.
 void scan_sm_parcel_for_strings(uint8_t *parcel, size_t size, size_t start = 0) {
     if (!parcel || size < sizeof(int32_t)) return;
     int total_hits = 0;
@@ -164,20 +193,23 @@ void scan_sm_parcel_for_strings(uint8_t *parcel, size_t size, size_t start = 0) 
     }
 }
 
-void process_transaction(const binder_transaction_data &txn) {
-    if (txn.data_size == 0 || txn.data.ptr.buffer == 0) return;
-    if (txn.target.handle != 0) return;
-    if (txn.flags & TF_ONE_WAY) return;
-
-    // Rewrite matching names before the transaction reaches ServiceManager.
-    // Do not depend on a particular IServiceManager transaction number or
-    // Parcel header size: both vary between platform releases, and newer
-    // lookup APIs (for example waitForService/isDeclared) would otherwise
-    // leave profile visible to callers.
-    auto *parcel = reinterpret_cast<uint8_t *>(txn.data.ptr.buffer);
-    scan_sm_parcel_for_strings(parcel, static_cast<size_t>(txn.data_size));
-
-    g_pending_sm_reply = true;
+size_t service_name_position(const binder_transaction_data &txn) {
+    if (txn.target.handle != 0 || (txn.flags & TF_ONE_WAY) ||
+        !txn.data.ptr.buffer || txn.data_size > MAX_REPLY_BUF) return SIZE_MAX;
+    constexpr char16_t descriptor[] = u"android.os.IServiceManager";
+    constexpr int32_t length = sizeof(descriptor) / sizeof(char16_t) - 1;
+    const auto *parcel = reinterpret_cast<const uint8_t *>(txn.data.ptr.buffer);
+    const size_t size = static_cast<size_t>(txn.data_size);
+    for (size_t off : {size_t{0}, size_t{4}, size_t{8}, size_t{12}, size_t{16}}) {
+        if (off + sizeof(int32_t) + sizeof(descriptor) > size) continue;
+        int32_t actual_length = 0;
+        std::memcpy(&actual_length, parcel + off, sizeof(actual_length));
+        if (actual_length != length ||
+            std::memcmp(parcel + off + sizeof(int32_t), descriptor, sizeof(descriptor)) != 0) continue;
+        const size_t position = align4(off + sizeof(int32_t) + sizeof(descriptor));
+        return position <= size ? position : SIZE_MAX;
+    }
+    return SIZE_MAX;
 }
 
 // Copy reply to swap buffer, filter it, and replace the pointer.
@@ -226,49 +258,126 @@ bool swap_reply_buffer(binder_transaction_data *txn) {
 }
 
 void process_reply(binder_transaction_data *txn) {
-    if (!g_pending_sm_reply) return;
-    g_pending_sm_reply = false;
+    if (!pop_reply_context()) return;
 
     if (!txn || txn->data_size == 0 || txn->data.ptr.buffer == 0) return;
 
     swap_reply_buffer(txn);
 }
 
-void process_write(binder_write_read *bwr) {
-    if (!bwr || !bwr->write_buffer || !bwr->write_size) return;
-    auto *ptr = reinterpret_cast<uint8_t *>(bwr->write_buffer);
-    auto *end = ptr + bwr->write_size;
+// Redirected request pointers stay valid until ioctl returns. Binder copies
+// consumed requests during that call; unconsumed commands are rebuilt on retry.
+class PrivateWrite {
+public:
+    explicit PrivateWrite(const binder_write_read &source) : source_(source) {}
+    ~PrivateWrite() {
+        while (requests_) {
+            Request *next = requests_->next;
+            std::free(requests_);
+            requests_ = next;
+        }
+        if (commands_ != inline_commands_) std::free(commands_);
+    }
+    PrivateWrite(const PrivateWrite &) = delete;
+    PrivateWrite &operator=(const PrivateWrite &) = delete;
 
-    while (ptr + sizeof(uint32_t) <= end) {
-        uint32_t cmd = 0;
-        std::memcpy(&cmd, ptr, sizeof(cmd));
-        ptr += sizeof(cmd);
+    bool ensure_commands() {
+        if (commands_) return true;
+        const size_t size = static_cast<size_t>(source_.write_size);
+        commands_ = size <= sizeof(inline_commands_) ? inline_commands_
+                    : static_cast<uint8_t *>(std::malloc(size));
+        if (!commands_) return false;
+        std::memcpy(commands_, reinterpret_cast<const void *>(source_.write_buffer), size);
+        return true;
+    }
 
-        if (cmd == BC_TRANSACTION || cmd == BC_REPLY) {
-            if (ptr + sizeof(binder_transaction_data) > end) return;
-            auto *txn = reinterpret_cast<binder_transaction_data *>(ptr);
-            if (cmd == BC_TRANSACTION) process_transaction(*txn);
-            ptr += sizeof(binder_transaction_data);
-        } else if (cmd == BC_TRANSACTION_SG) {
-            if (ptr + sizeof(binder_transaction_data_sg_local) > end) return;
-            auto *txn = reinterpret_cast<binder_transaction_data_sg_local *>(ptr);
-            process_transaction(txn->transaction_data);
-            ptr += sizeof(binder_transaction_data_sg_local);
-        } else if (cmd == BC_FREE_BUFFER) {
-            if (ptr + sizeof(binder_uintptr_t) > end) return;
-            binder_uintptr_t *buf_ptr = reinterpret_cast<binder_uintptr_t *>(ptr);
-            if (g_active_swap_ptr != nullptr &&
-                *buf_ptr == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
-                g_active_swap_ptr = nullptr;
-                // The kernel owns the original reply buffer, not the swap.
-                // Return its actual address so the driver can release it.
-                *buf_ptr = g_original_reply_buffer;
-                g_original_reply_buffer = 0;
-                log_info("swap: intercepted BC_FREE_BUFFER for swap buffer");
+    void copy_request(size_t command_offset, binder_transaction_data txn) {
+        const size_t name_position = service_name_position(txn);
+        if (name_position == SIZE_MAX) return;
+        const size_t size = static_cast<size_t>(txn.data_size);
+        const auto *original = reinterpret_cast<const uint8_t *>(txn.data.ptr.buffer);
+        int32_t length = 0;
+        if (!matches_string16(original, size, name_position, length)) return;
+        if (!ensure_commands()) return;
+        auto *copy = static_cast<Request *>(std::malloc(sizeof(Request) + size));
+        if (!copy) return;
+        copy->next = requests_;
+        requests_ = copy;
+        auto *parcel = reinterpret_cast<uint8_t *>(copy + 1);
+        std::memcpy(parcel, original, size);
+        overwrite_utf16(reinterpret_cast<char16_t *>(parcel + name_position + sizeof(int32_t)), length);
+        txn.data.ptr.buffer = reinterpret_cast<binder_uintptr_t>(parcel);
+        std::memcpy(commands_ + command_offset, &txn, sizeof(txn));
+    }
+
+    uint8_t *commands() const { return commands_; }
+
+private:
+    struct Request { Request *next; };
+    const binder_write_read &source_;
+    Request *requests_ = nullptr;
+    uint8_t *commands_ = nullptr;
+    alignas(binder_uintptr_t) uint8_t inline_commands_[512];
+};
+
+// Binder command payloads are four-byte aligned even on 64-bit devices.
+// Copy fields instead of dereferencing potentially unaligned structs.
+bool next_write_command(const uint8_t *stream, size_t size, size_t &position,
+                        uint32_t &command, size_t &payload) {
+    if (position > size || size - position < sizeof(command)) return false;
+    std::memcpy(&command, stream + position, sizeof(command));
+    if (_IOC_TYPE(command) != 'c') return false;
+    payload = position + sizeof(command);
+    const size_t length = _IOC_SIZE(command);
+    if (length > size - payload) return false;
+    position = payload + length;
+    return true;
+}
+
+bool prepare_write(const binder_write_read &bwr, PrivateWrite &copy) {
+    if (!bwr.write_buffer || bwr.write_consumed > bwr.write_size) return true;
+    const auto *stream = reinterpret_cast<const uint8_t *>(bwr.write_buffer);
+    size_t position = static_cast<size_t>(bwr.write_consumed);
+    const size_t size = static_cast<size_t>(bwr.write_size);
+    uint32_t command = 0;
+    size_t payload = 0;
+    while (next_write_command(stream, size, position, command, payload)) {
+        if (command == BC_TRANSACTION || command == BC_TRANSACTION_SG) {
+            binder_transaction_data txn;
+            std::memcpy(&txn, stream + payload, sizeof(txn));
+            copy.copy_request(payload, txn);
+        } else if (command == BC_FREE_BUFFER) {
+            binder_uintptr_t buffer = 0;
+            std::memcpy(&buffer, stream + payload, sizeof(buffer));
+            if (g_active_swap_ptr && buffer == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
+                // This translation is mandatory: the driver must never receive
+                // the userspace swap address, including allocation failures.
+                if (!copy.ensure_commands()) return false;
+                std::memcpy(copy.commands() + payload, &g_original_reply_buffer, sizeof(buffer));
             }
-            ptr += sizeof(binder_uintptr_t);
-        } else {
-            return;
+        }
+    }
+    return true;
+}
+
+void consumed_write(const binder_write_read &source, binder_size_t consumed) {
+    if (!source.write_buffer || consumed > source.write_size || consumed < source.write_consumed) return;
+    const auto *stream = reinterpret_cast<const uint8_t *>(source.write_buffer);
+    size_t position = static_cast<size_t>(source.write_consumed);
+    uint32_t command = 0;
+    size_t payload = 0;
+    while (next_write_command(stream, static_cast<size_t>(consumed), position, command, payload)) {
+        if (command == BC_TRANSACTION || command == BC_TRANSACTION_SG) {
+            binder_transaction_data txn;
+            std::memcpy(&txn, stream + payload, sizeof(txn));
+            if (!(txn.flags & TF_ONE_WAY)) push_reply_context(service_name_position(txn) != SIZE_MAX);
+        } else if (command == BC_FREE_BUFFER) {
+            binder_uintptr_t buffer = 0;
+            std::memcpy(&buffer, stream + payload, sizeof(buffer));
+            if (g_active_swap_ptr && buffer == reinterpret_cast<binder_uintptr_t>(g_active_swap_ptr)) {
+                g_active_swap_ptr = nullptr;
+                g_original_reply_buffer = 0;
+            }
         }
     }
 }
@@ -286,8 +395,10 @@ void process_read(binder_write_read *bwr) {
         switch (cmd) {
             case BR_REPLY: {
                 if (ptr + sizeof(binder_transaction_data) > end) return;
-                auto *txn = reinterpret_cast<binder_transaction_data *>(ptr);
-                process_reply(txn);
+                binder_transaction_data txn;
+                std::memcpy(&txn, ptr, sizeof(txn));
+                process_reply(&txn);
+                std::memcpy(ptr, &txn, sizeof(txn));
                 ptr += sizeof(binder_transaction_data);
                 break;
             }
@@ -298,7 +409,8 @@ void process_read(binder_write_read *bwr) {
             }
             case BR_DEAD_REPLY:
             case BR_FAILED_REPLY:
-                g_pending_sm_reply = false;
+            case BR_FROZEN_REPLY:
+                pop_reply_context();
                 break;
             case BR_NOOP:
             case BR_TRANSACTION_COMPLETE:
@@ -309,8 +421,12 @@ void process_read(binder_write_read *bwr) {
                 if (ptr + sizeof(binder_uintptr_t) > end) return;
                 ptr += sizeof(binder_uintptr_t);
                 break;
-            default:
-                return;
+            default: {
+                const size_t size = _IOC_SIZE(cmd);
+                if (_IOC_TYPE(cmd) != 'r' || size > static_cast<size_t>(end - ptr)) return;
+                ptr += size;
+                break;
+            }
         }
     }
 }
@@ -321,9 +437,20 @@ int hook_ioctl(int fd, unsigned long request, void *arg) {
     }
 
     auto *bwr = reinterpret_cast<binder_write_read *>(arg);
-    process_write(bwr);
-    const int ret = g_original_ioctl ? g_original_ioctl(fd, request, arg) : -1;
-    if (ret == 0 && g_pending_sm_reply) process_read(bwr);
+    PrivateWrite copy(*bwr);
+    if (!prepare_write(*bwr, copy)) {
+        errno = ENOMEM;
+        return -1;
+    }
+    binder_write_read submitted = *bwr;
+    if (copy.commands()) submitted.write_buffer = reinterpret_cast<binder_uintptr_t>(copy.commands());
+    const int ret = g_original_ioctl ? g_original_ioctl(fd, request, &submitted) : -1;
+    const int saved_errno = errno;
+    consumed_write(*bwr, submitted.write_consumed);
+    bwr->write_consumed = submitted.write_consumed;
+    bwr->read_consumed = submitted.read_consumed;
+    if (ret == 0 && (g_pending_sm_reply || g_reply_depth || g_reply_overflow)) process_read(bwr);
+    errno = saved_errno;
     return ret;
 }
 
