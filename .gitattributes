@@ -1,2 +1,8 @@
 * text=auto eol=lf
 *.sh text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.properties text eol=lf
+*.jar binary

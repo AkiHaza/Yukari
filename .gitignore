@@ -5,3 +5,8 @@ build/
 .cxx/
 .externalNativeBuild/
 .DS_Store
+.gradle/
+out/
+local.properties
+!tests/build/
+!tests/build/**

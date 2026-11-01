@@ -4,12 +4,14 @@ plugins {
 
 android {
     namespace = "com.yukari.module"
-    compileSdk = 36
+    compileSdk = providers.gradleProperty("yukari.compileSdk").get().toInt()
+    buildToolsVersion = providers.gradleProperty("yukari.buildToolsVersion").get()
+    ndkVersion = providers.gradleProperty("yukari.ndkVersion").get()
 
     defaultConfig {
         applicationId = "com.yukari.module.stub"
-        minSdk = 26
-        targetSdk = 36
+        minSdk = providers.gradleProperty("yukari.minSdk").get().toInt()
+        targetSdk = providers.gradleProperty("yukari.targetSdk").get().toInt()
         versionCode = 1
         versionName = "0.1.0"
 
@@ -25,6 +27,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
+            version = providers.gradleProperty("yukari.cmakeVersion").get()
         }
     }
 }

@@ -70,11 +70,20 @@ is preserved by `action.sh`.
 
 ### Build
 
-
 ```bash
-gradle :module:assembleRelease
-bash scripts/package.sh
+bash scripts/build.sh test     # Host tests; no Android SDK required
+bash scripts/build.sh android  # SDK preparation, Gradle release, verified ZIP
+# Or run both: bash scripts/build.sh all
 ```
+
+Android builds require JDK 17 and an Android SDK with command-line tools. Set
+`JAVA_HOME` and `ANDROID_HOME` (or `ANDROID_SDK_ROOT`). The official checked
+Gradle Wrapper supplies Gradle 8.11.1; SDK/NDK/CMake versions are shared in
+`gradle.properties`. Output: `out/Yukari.zip`. See [build details](docs/build.md).
+
+CI runs host validation separately from Android packaging. Every run logs the
+checked-out commit and retains phase logs under `out/diagnostics/`. Push the new
+commit to run the new workflow; rerunning an old Actions run keeps its old commit.
 
 Native regression tests run on Linux/WSL with a C++20 compiler, CMake, make,
 binutils and JDK JNI headers; see [test prerequisites](tests/native/README.md):

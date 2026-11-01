@@ -63,11 +63,20 @@ Parcel 位置时保守放行。`action.sh` 重新生成目标列表时保留此�
 
 ### 构建
 
-
 ```bash
-gradle :module:assembleRelease
-bash scripts/package.sh
+bash scripts/build.sh test     # 宿主测试，不需要 Android SDK
+bash scripts/build.sh android  # SDK 准备、Gradle 编译、ZIP 验证
+# 或完整执行：bash scripts/build.sh all
 ```
+
+Android 构建需 JDK 17，以及带命令行工具的 Android SDK；设置 `JAVA_HOME` 和
+`ANDROID_HOME`（或 `ANDROID_SDK_ROOT`）。官方 Wrapper 固定 Gradle 8.11.1 并
+校验下载哈希；SDK、NDK、CMake 版本统一写在 `gradle.properties`。产物为
+`out/Yukari.zip`，详见[构建说明](docs/build.md)。
+
+CI 将宿主验证与 Android 打包拆为独立任务。每次显示实际构建提交，并将阶段
+日志保留在 `out/diagnostics/`。修改后需推送新提交触发新运行；对旧 Actions
+运行点“重新运行”，仍会使用旧提交和旧工作流。
 
 可在具有 C++20 编译器、CMake、make、binutils 和 JDK JNI 头文件的 Linux/WSL
 环境运行回归测试，详见[测试依赖与覆盖范围](tests/native/README.md)：

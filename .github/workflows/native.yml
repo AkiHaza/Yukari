@@ -2,87 +2,81 @@ name: Build Yukari Module
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, 'codex/**']
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: yukari-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  host-tests:
+    name: Native and build infrastructure tests
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout requested commit
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Run host validation
+        run: bash scripts/build.sh test
+
+      - name: Upload host diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          # v3 defaults include the retired SDK package named "tools".
-          packages: platform-tools
-          log-accepted-android-sdk-licenses: 'false'
+          name: Yukari-host-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
+          path: out/diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
 
-      - name: Set up Gradle
+  android-build:
+    name: Android release and module package
+    needs: host-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout requested commit
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Cache Gradle and validate Wrapper
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
 
-      - name: Inject version info
-        run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          RUN_NUMBER="${{ github.run_number }}"
-          BRANCH_NAME=${GITHUB_REF#refs/heads/}
-          if [ "$BRANCH_NAME" = "dev" ]; then
-            sed -i "s/^version=.*/version=1.0.0-dev (${RUN_NUMBER}-${SHORT_SHA})/" module/module.prop
-          else
-            sed -i "s/^version=.*/version=1.0.0 (${RUN_NUMBER}-${SHORT_SHA})/" module/module.prop
-          fi
-          sed -i "s/^versionCode=.*/versionCode=${RUN_NUMBER}/" module/module.prop
-          echo "Branch: $BRANCH_NAME"
-          echo "Version: $(grep '^version=' module/module.prop)"
-          cat module/module.prop
-
-      - name: Test native filtering
-        run: bash tests/native/run.sh
-
-      - name: Build native library
-        run: gradle :module:assembleRelease
-
-      - name: Package Magisk module
-        run: bash scripts/package.sh
-
-      - name: Verify module package
-        run: |
-          test -f out/Yukari.zip
-          unzip -l out/Yukari.zip
-          unzip -l out/Yukari.zip | grep -q 'module.prop'
-          unzip -l out/Yukari.zip | grep -q 'zygisk/arm64-v8a.so'
-          unzip -l out/Yukari.zip | grep -q 'action.sh'
-          unzip -l out/Yukari.zip | grep -q 'customize.sh'
-          unzip -p out/Yukari.zip module.prop | grep -q 'version='
-          unzip -p out/Yukari.zip zygisk/arm64-v8a.so > /tmp/yukari.so
-          bash scripts/verify_elf.sh /tmp/yukari.so --android
+      - name: Prepare SDK, compile and package
+        run: bash scripts/build.sh android
 
       - name: Upload Yukari module
         uses: actions/upload-artifact@v4
         with:
-          name: Yukari-${{ github.sha }}
+          name: Yukari-${{ github.sha }}-${{ github.run_attempt }}
           path: out/Yukari.zip
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload native build diagnostics
-        if: failure()
+      - name: Upload Android diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Yukari-native-diagnostics-${{ github.sha }}
+          name: Yukari-android-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
           path: |
+            out/diagnostics/
             module/build/outputs/
             module/build/intermediates/cxx/
-            module/build/intermediates/stripped_native_libs/
+            module/.cxx/
+          include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
