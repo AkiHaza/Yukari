@@ -7,6 +7,7 @@ add_library(yukari SHARED
     service_match.cpp
     service_cache.cpp
     binder_hook.cpp
+    feature_hook.cpp
     logger.cpp
 )
 

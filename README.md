@@ -18,7 +18,7 @@ Matching is ASCII case-insensitive and built into the module:
 - `protonaosp`
 - `profile`
 
-Users configure target applications only. The module does not stop or unregister services globally; filtering is scoped to selected application processes.
+Users configure target applications and optional filtering channels. The module does not stop or unregister services globally; filtering is scoped to selected application processes.
 
 ### Current native behavior
 
@@ -43,13 +43,23 @@ filtered reply also returns its original buffer to the Binder driver.
 ```json
 {
   "enabled": true,
+  "hide_features": false,
   "targets": [
     "com.example.app"
   ]
 }
 ```
 
+`hide_features` opts selected processes into exact Lineage feature filtering.
+Queries use a private Parcel; enumeration replaces returned strings only for a
+tracked PackageManager feature reply. Query and enumeration support are reported
+separately. Missing JNI methods or unsupported lifecycle ABIs leave the affected
+capability visible. This covers Java calls and the initial enumeration reply;
+deferred ParceledListSlice chunks, unknown reply headers, and explicit Parcel
+repositioning are conservatively left visible. `action.sh` preserves this option.
+
 ### Build
+
 
 ```bash
 gradle :module:assembleRelease

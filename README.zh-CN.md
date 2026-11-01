@@ -18,7 +18,7 @@ Zygisk 模块，用于隐藏指定目标应用的自定义 ROM 服务信号。
 - `protonaosp`
 - `profile`
 
-用户只需配置目标应用。模块不会全局停止或注销服务；过滤仅作用于选定的应用进程。
+用户可配置目标应用和可选过滤通道。模块不会全局停止或注销服务；过滤仅作用于选定的应用进程。
 
 ### 当前 native 行为
 
@@ -41,13 +41,21 @@ Binder 缓冲区；命中的回复使用按需增长、可复用的线程本地�
 ```json
 {
   "enabled": true,
+  "hide_features": false,
   "targets": [
     "com.example.app"
   ]
 }
 ```
 
+`hide_features` 为目标进程启用精确 Lineage feature 过滤，默认关闭。查询使用
+私有 Parcel；枚举仅替换已登记的 PackageManager 回复所读取的字符串。日志分别
+报告查询与枚举是否可用；JNI 方法或生命周期 ABI 不支持时，对应能力保持可见。
+覆盖 Java 调用和首次枚举回复；ParceledListSlice 延迟分片、未知回复头、主动重设
+Parcel 位置时保守放行。`action.sh` 重新生成目标列表时保留此选项。
+
 ### 构建
+
 
 ```bash
 gradle :module:assembleRelease

@@ -1,4 +1,5 @@
 {
   "enabled": true,
+  "hide_features": false,
   "targets": []
 }

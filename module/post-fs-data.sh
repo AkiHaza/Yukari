@@ -6,6 +6,7 @@ if [ ! -f "$CONFIG" ]; then
   cat > "$CONFIG" <<'EOF'
 {
   "enabled": true,
+  "hide_features": false,
   "targets": []
 }
 EOF

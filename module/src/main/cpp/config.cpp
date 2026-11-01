@@ -133,6 +133,7 @@ bool load_config(YukariConfig &out) {
     out = {};
     out.enabled = true;
     parse_bool(text, "enabled", out.enabled);
+    parse_bool(text, "hide_features", out.hide_features);
     out.targets = parse_targets(text);
     return true;
 }

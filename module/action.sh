@@ -17,8 +17,10 @@ fi
 
 # Preserve existing settings
 ENABLED="true"
+HIDE_FEATURES="false"
 if [ -f "$CONFIG" ]; then
     grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$CONFIG" && ENABLED="false"
+    grep -q '"hide_features"[[:space:]]*:[[:space:]]*true' "$CONFIG" && HIDE_FEATURES="true"
 fi
 
 CURRENT_USER="$(am get-current-user 2>/dev/null)"
@@ -33,6 +35,7 @@ PACKAGE_COUNT="$(wc -l < "$PACKAGE_LIST" | tr -d ' ')"
 {
     echo "{"
     echo "  \"enabled\": $ENABLED,"
+    echo "  \"hide_features\": $HIDE_FEATURES,"
     echo "  \"targets\": ["
 
     INDEX=0

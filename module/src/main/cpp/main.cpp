@@ -1,5 +1,6 @@
 #include "binder_hook.h"
 #include "config.h"
+#include "feature_hook.h"
 #include "logger.h"
 #include "service_cache.h"
 #include "zygisk.hpp"
@@ -64,6 +65,13 @@ public:
 
         g_enabled_for_process = true;
         if (api_) api_->setOption(zygisk::Option::FORCE_DENYLIST_UNMOUNT);
+        if (g_config.hide_features) {
+            try {
+                install_feature_hooks(env_, api_);
+            } catch (...) {
+                log_error("feature hook setup failed; features stay visible");
+            }
+        }
         log_info("matched target %s", g_package_name.c_str());
     }
 
