@@ -9,4 +9,4 @@ struct YukariConfig {
 };
 
 bool load_config(YukariConfig &out);
-bool is_target(const YukariConfig &config, const std::string &package_name);
+bool is_target(const YukariConfig &config, const std::string &process_name);

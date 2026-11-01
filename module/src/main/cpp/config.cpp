@@ -137,8 +137,12 @@ bool load_config(YukariConfig &out) {
     return true;
 }
 
-bool is_target(const YukariConfig &config, const std::string &package_name) {
-    if (!config.enabled || package_name.empty()) return false;
+bool is_target(const YukariConfig &config, const std::string &process_name) {
+    if (!config.enabled || process_name.empty()) return false;
+    const std::string_view process(process_name);
+    const auto colon = process.find(':');
+    const auto package = process.substr(0, colon);
+    if (package.empty()) return false;
     static constexpr std::string_view protected_packages[] = {
         "android",
         "system",
@@ -147,7 +151,14 @@ bool is_target(const YukariConfig &config, const std::string &package_name) {
         "com.android.settings",
     };
     for (const auto protected_package : protected_packages) {
-        if (protected_package == package_name) return false;
+        if (protected_package == package) return false;
     }
-    return std::find(config.targets.begin(), config.targets.end(), package_name) != config.targets.end();
+    for (const auto &target : config.targets) {
+        // A package rule includes its private processes. An explicit process
+        // rule remains exact, so com.example:worker does not match :remote.
+        if (target == process || (target.find(':') == std::string::npos && target == package)) {
+            return true;
+        }
+    }
+    return false;
 }

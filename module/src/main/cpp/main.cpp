@@ -35,6 +35,12 @@ public:
         g_enabled_for_process = false;
         g_package_name.clear();
         if (!args) return;
+        // appId, rather than the full uid, also protects secondary users'
+        // system processes. Private app processes keep their app's appId.
+        if (args->uid < 0 || args->uid % 100000 < 10000) {
+            if (api_) api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
+            return;
+        }
 
         g_package_name = jstr_to_str(env_, args->nice_name);
         if (!is_target(g_config, g_package_name)) {
@@ -56,6 +62,10 @@ public:
         // These inputs are only needed while specializing this app process.
         std::vector<std::string>{}.swap(g_config.targets);
         std::string{}.swap(g_package_name);
+    }
+
+    void preServerSpecialize(zygisk::ServerSpecializeArgs *) override {
+        if (api_) api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
     }
 
 private:

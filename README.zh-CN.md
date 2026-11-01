@@ -23,6 +23,8 @@ Zygisk 模块，用于隐藏指定目标应用的自定义 ROM 服务信号。
 ### 当前 native 行为
 
 - Zygisk 应用特化时匹配配置的目标包名。
+- 包名规则同时覆盖 `com.example.app:remote` 等私有子进程；包含冒号的进程规则
+  仍为精确匹配。系统 appId 和受保护框架包（含其子进程）不会注入。
 - 移除 Java `ServiceManager.sCache` 中包含固定 ROM 关键词的条目。
 - Binder 请求过滤：在请求到达 ServiceManager 之前，重写匹配的服务查询名。
 - Binder 回复过滤：使用安全的缓冲区交换机制，扫描并过滤所有 ServiceManager 回复（包括 `listServices` 和 `getServiceDebugInfo`）。阻止应用枚举隐藏的服务。

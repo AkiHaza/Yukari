@@ -23,6 +23,9 @@ Users configure target applications only. The module does not stop or unregister
 ### Current native behavior
 
 - Zygisk app specialization matches configured target packages.
+- A package target also covers private processes such as `com.example.app:remote`;
+  an explicit process target remains an exact match. System app IDs and protected
+  framework packages are excluded, including their private processes.
 - Java `ServiceManager.sCache` entries containing fixed ROM keywords are removed.
 - Binder request filtering rewrites matching service lookup names before they reach ServiceManager.
 - Binder reply filtering uses a safe buffer swap mechanism to scan and filter all ServiceManager replies (including `listServices` and `getServiceDebugInfo`). This prevents apps from enumerating hidden services.

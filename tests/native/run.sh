@@ -16,3 +16,9 @@ read -r -a extra_ldflags <<< "${LDFLAGS:-}"
     "${extra_ldflags[@]}" \
     -o "$build_dir/binder_test"
 "$build_dir/binder_test"
+
+"${CXX:-g++}" -std=c++20 -O2 -Wall -Wextra -Werror \
+    "${extra_cxxflags[@]}" -I"$root/module/src/main/cpp" \
+    "$root/tests/native/config_test.cpp" "$root/module/src/main/cpp/config.cpp" \
+    "${extra_ldflags[@]}" -o "$build_dir/config_test"
+"$build_dir/config_test"
