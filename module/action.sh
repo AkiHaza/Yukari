@@ -17,12 +17,12 @@ fi
 
 # Preserve existing settings
 ENABLED="true"
-HIDE_FEATURES="false"
-HIDE_RESOURCES="false"
+HIDE_FEATURES="true"
+HIDE_RESOURCES="true"
 if [ -f "$CONFIG" ]; then
     grep -q '"enabled"[[:space:]]*:[[:space:]]*false' "$CONFIG" && ENABLED="false"
-    grep -q '"hide_features"[[:space:]]*:[[:space:]]*true' "$CONFIG" && HIDE_FEATURES="true"
-    grep -q '"hide_resources"[[:space:]]*:[[:space:]]*true' "$CONFIG" && HIDE_RESOURCES="true"
+    grep -q '"hide_features"[[:space:]]*:[[:space:]]*false' "$CONFIG" && HIDE_FEATURES="false"
+    grep -q '"hide_resources"[[:space:]]*:[[:space:]]*false' "$CONFIG" && HIDE_RESOURCES="false"
 fi
 
 CURRENT_USER="$(am get-current-user 2>/dev/null)"

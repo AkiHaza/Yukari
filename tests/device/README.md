@@ -11,9 +11,10 @@ and module commit for every device run.
    never overwrite a shared library that zygote still maps.
 2. Add a probe application's package to `targets`. Use the same probe in an
    untargeted control application, or compare runs with `enabled: false`.
-3. Begin with `hide_features` and `hide_resources` false, then enable each
-   independently before testing both together. Force-stop and reopen the apps
-   after configuration changes.
+3. Verify the default configuration has `enabled`, `hide_features` and
+   `hide_resources` true. For isolated coverage, explicitly set `hide_features`
+   and `hide_resources` false, then enable each independently before testing both
+   together. Force-stop and reopen the apps after configuration changes.
 4. Run `bash scripts/diagnose_device.sh package.name [adb-serial]`. It reads
    configuration, process identities and Yukari logs without changing the device.
    A loading log proves installation, not successful behavior filtering.

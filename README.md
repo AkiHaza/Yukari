@@ -45,15 +45,19 @@ filtered reply also returns its original buffer to the Binder driver.
 ```json
 {
   "enabled": true,
-  "hide_features": false,
-  "hide_resources": false,
+  "hide_features": true,
+  "hide_resources": true,
   "targets": [
     "com.example.app"
   ]
 }
 ```
 
-`hide_features` opts selected processes into exact Lineage feature filtering.
+All three switches default to `true`. Set any switch explicitly to `false` to disable
+the corresponding behavior.
+
+`hide_features` enables exact Lineage feature filtering for selected processes
+by default.
 Queries use a private Parcel; enumeration replaces returned strings only for a
 tracked PackageManager feature reply. Query and enumeration support are reported
 separately. Missing JNI methods or unsupported lifecycle ABIs leave the affected
@@ -65,7 +69,7 @@ repositioning are conservatively left visible. `action.sh` preserves this option
 single values and name lookups. Resource IDs are filtered only after the current
 AssetManager confirms their package mapping; an unrelated `0x3f` package remains
 untouched. Missing mappings leave ID access visible. Arrays, themes and package
-map enumeration are outside this channel. This option also defaults to false and
+map enumeration are outside this channel. This option also defaults to true and
 is preserved by `action.sh`.
 
 ### Build

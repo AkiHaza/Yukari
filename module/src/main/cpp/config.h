@@ -6,8 +6,8 @@
 struct YukariConfig {
     bool enabled = false;
     std::vector<std::string> targets;
-    bool hide_features = false;
-    bool hide_resources = false;
+    bool hide_features = true;
+    bool hide_resources = true;
 };
 
 bool load_config(YukariConfig &out);
