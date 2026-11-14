@@ -6,8 +6,11 @@
 #include "service_cache.h"
 #include "zygisk.hpp"
 
+#include <cerrno>
+#include <cstring>
 #include <jni.h>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -44,12 +47,6 @@ public:
     void onLoad(zygisk::Api *api, JNIEnv *env) override {
         api_ = api;
         env_ = env;
-        try {
-            load_config(g_config);
-        } catch (...) {
-            g_config = {};
-            log_error("configuration load failed; filtering disabled");
-        }
     }
 
     void preAppSpecialize(zygisk::AppSpecializeArgs *args) override {
@@ -64,6 +61,8 @@ public:
             return;
         }
 
+        // getModuleDir is only valid in pre-specialization callbacks, not onLoad.
+        read_configuration();
         g_package_name = jstr_to_str(env_, args->nice_name);
         if (!is_target(g_config, g_package_name)) {
             if (api_) api_->setOption(zygisk::Option::DLCLOSE_MODULE_LIBRARY);
@@ -124,6 +123,33 @@ public:
     }
 
 private:
+    void read_configuration() {
+        g_config = {};
+        int module_dir = -1;
+        try {
+            if (!api_) {
+                log_error("configuration load failed: Zygisk API unavailable; filtering disabled");
+                return;
+            }
+            errno = 0;
+            module_dir = api_->getModuleDir();
+            if (module_dir < 0) {
+                log_error("configuration load failed: getModuleDir returned %d (errno=%d); filtering disabled",
+                          module_dir, errno);
+                return;
+            }
+            if (!load_config(g_config, module_dir)) {
+                const int error = errno;
+                log_error("configuration load failed: config.json (errno=%d: %s); filtering disabled",
+                          error, std::strerror(error));
+            }
+        } catch (...) {
+            g_config = {};
+            log_error("configuration load failed; filtering disabled");
+        }
+        if (module_dir >= 0) close(module_dir);
+    }
+
     zygisk::Api *api_ = nullptr;
     JNIEnv *env_ = nullptr;
 };

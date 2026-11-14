@@ -1,26 +1,48 @@
 #include "config.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cctype>
 #include <cstdio>
+#include <fcntl.h>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unistd.h>
 
 namespace {
-constexpr const char *kConfigPath = "/data/adb/modules/Yukari/config.json";
+struct FileCloser {
+    void operator()(FILE *file) const { std::fclose(file); }
+};
 
-std::string read_file(const char *path) {
-    FILE *fp = std::fopen(path, "rb");
-    if (!fp) return {};
-    std::string out;
+bool read_config(int module_dir_fd, std::string &out) {
+    // Zygote cannot traverse /data/adb on enforcing devices. Zygisk supplies
+    // an already-open module directory so only the config file is accessed.
+    if (module_dir_fd < 0) {
+        errno = EBADF;
+        return false;
+    }
+    const int fd = openat(module_dir_fd, "config.json", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    FILE *raw = fdopen(fd, "rb");
+    if (!raw) {
+        const int error = errno;
+        close(fd);
+        errno = error;
+        return false;
+    }
+    std::unique_ptr<FILE, FileCloser> fp(raw);
     char buffer[4096];
     while (true) {
-        size_t n = std::fread(buffer, 1, sizeof(buffer), fp);
+        const size_t n = std::fread(buffer, 1, sizeof(buffer), fp.get());
         if (n > 0) out.append(buffer, n);
-        if (n < sizeof(buffer)) break;
+        if (n < sizeof(buffer)) {
+            const int error = std::ferror(fp.get()) ? (errno ? errno : EIO) : 0;
+            fp.reset();
+            errno = error;
+            return error == 0;
+        }
     }
-    std::fclose(fp);
-    return out;
 }
 
 void skip_ws(const std::string &text, size_t &pos) {
@@ -123,14 +145,15 @@ std::vector<std::string> parse_targets(const std::string &text) {
 }
 } // namespace
 
-bool load_config(YukariConfig &out) {
-    const std::string text = read_file(kConfigPath);
+bool load_config(YukariConfig &out, int module_dir_fd) {
+    out = {};
+    std::string text;
+    if (!read_config(module_dir_fd, text)) return false;
     if (text.empty()) {
-        out = {};
+        errno = EINVAL;
         return false;
     }
 
-    out = {};
     out.enabled = true;
     parse_bool(text, "enabled", out.enabled);
     parse_bool(text, "hide_features", out.hide_features);

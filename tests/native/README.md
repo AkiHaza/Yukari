@@ -29,6 +29,8 @@ count native allocations and simulate allocation failures. Tests cover:
   replies (including failed/frozen synchronous calls).
 - Package targets covering private processes without prefix overmatching,
   exact process rules, protected packages and disabled configuration.
+- Configuration reads relative to a borrowed module directory descriptor,
+  including renamed directories, option defaults, failed reads and FD ownership.
 - Cache cleanup with failure injection at 31 JNI call sites, caller exception
   preservation, string lifetime and local reference/frame cleanup.
 - Exact feature matching and bounded reply provenance. A second test uses real
