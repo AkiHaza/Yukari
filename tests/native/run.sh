@@ -62,4 +62,5 @@ fi
 
 JAVA_HOME="$jni_home" bash "$root/tests/native/production_build.sh"
 bash -n "$root/module/action.sh" "$root/module/post-fs-data.sh" \
+    "$root/module/service.sh" "$root/module/customize.sh" "$root/module/webui.sh" \
     "$root/scripts/diagnose_device.sh" "$root/scripts/package.sh"

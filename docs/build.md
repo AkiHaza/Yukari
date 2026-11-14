@@ -52,7 +52,17 @@ bash scripts/package.sh --library /path/to/libyukari.so --output /path/to/Yukari
 打包使用输出目录内的隔离暂存目录。只有完整验证成功，才原子替换目标 ZIP；
 失败不破坏已有 ZIP。CI 的版本号只写入暂存 `module.prop`，不修改仓库原文件。
 ELF 验证要求 AArch64 动态库且仅导出 Zygisk 入口；ZIP 验证检查必要文件、
-重复/危险路径、CRC 和模块属性。
+重复/危险路径、CRC 和模块属性。暂存内容除脚本与 `zygisk/arm64-v8a.so` 外，
+还包括 WebUI 的 `webroot/index.html`、`webroot/assets/style.css`、
+`webroot/assets/app.js` 与后端 `webui.sh`；`webui.sh` 与其他入口脚本同为
+`0755`，`webroot` 下的静态文件为 `0644`，缺失任一文件都会使打包失败。
+
+WebUI 的颜色令牌由 `tools/monet.py` 按 Monet 的 TonalSpot 2025 方案生成，
+输出可直接替换 `style.css` 顶部的变量块；`python3 tools/monet.py --verify`
+会逐项比对样式表与生成结果，不一致时以非零状态退出。该脚本只在本地跑，
+不进入模块 ZIP，也不参与构建链；它的 HCT/CAM16 实现与
+`@material/material-color-utilities` 0.4.0 的 `SchemeTonalSpot(spec: 2025)`
+逐色对齐（每个角色最多相差 3/255）。
 
 每次统一入口运行创建 `out/diagnostics/<模式>.<随机ID>/`，记录源码提交、
 请求 ref/SHA、工作区状态及各阶段日志。失败时输出对应目录，旧日志不会冒充

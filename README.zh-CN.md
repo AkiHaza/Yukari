@@ -63,6 +63,32 @@ Parcel 位置时保守放行。`action.sh` 重新生成目标列表时保留此�
 无关的 `0x3f` 包当成 Lineage；映射缺失时 ID 访问保持可见。资源数组、theme
 和包映射列表不在此通道范围内。`action.sh` 同样保留此选项。
 
+### WebUI
+
+模块自带 WebUI，前端位于 `webroot/`，后端为 `webui.sh`，二者随模块 ZIP 一起安装。
+界面采用 Material 3 Expressive 风格，跟随系统中深浅色，也可在右上角手动切换。
+配色由 Monet 的 TonalSpot 2025 方案从种子色 `#6a49c8` 生成，圆角使用
+M3 Expressive 的形状刻度（`4 / 8 / 12 / 16 / 20 / 28 / 32 / full`），
+状态面板即 extra-large 的 28dp。想换主题色时改 `tools/monet.py` 里的种子并重新生成
+令牌即可，该脚本不随模块打包。
+
+打开方式：
+
+- **KernelSU / APatch**：模块卡片上的 WebUI 入口（原生支持模块 `webroot`）。
+- **Magisk**：点击模块的 Action 按钮，`action.sh` 会在 KSU WebUI Standalone
+  或 WebUI X 中打开界面；两者都未安装时退回原来的终端流程，并提示安装地址。
+
+WebUI 提供：
+
+- 第三方应用列表、搜索、`全部 / 已保护 / 失效规则` 筛选，以及全选与清空（可撤销）。
+- 勾选即写入 `config.json`，自动保存，无需手动提交。
+- 手动添加包名，或写成 `com.example.app:remote` 只匹配单个进程。
+- 总开关与 `hide_features`、`hide_resources` 两条通道的独立开关。
+- 一键强制停止目标应用，让新配置立即生效；失效规则（已卸载应用）会继续保留。
+
+后端子命令：`webui.sh info`、`targets`、`apps`、`save '<json>'`、`force-stop`。
+`save` 只接受单行 JSON 对象，原子替换配置文件（先写 `config.json.tmp` 再改名）。
+
 ### 构建
 
 ```bash

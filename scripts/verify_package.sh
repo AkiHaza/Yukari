@@ -27,7 +27,8 @@ import zlib
 
 required = {
     "module.prop", "config.json", "post-fs-data.sh", "service.sh",
-    "action.sh", "customize.sh", "zygisk/arm64-v8a.so",
+    "action.sh", "customize.sh", "webui.sh", "zygisk/arm64-v8a.so",
+    "webroot/index.html", "webroot/assets/style.css", "webroot/assets/app.js",
 }
 
 def fail(message):

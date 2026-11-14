@@ -72,11 +72,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 STAGE="$WORK_DIR/stage"
 TEMP_ZIP="$WORK_DIR/Yukari.zip"
-mkdir -p -- "$STAGE/zygisk"
-for file in module.prop config.json post-fs-data.sh service.sh action.sh customize.sh; do
+mkdir -p -- "$STAGE/zygisk" "$STAGE/webroot/assets"
+for file in module.prop config.json post-fs-data.sh service.sh action.sh customize.sh webui.sh; do
   cp -- "$ROOT_DIR/module/$file" "$STAGE/$file"
 done
-chmod 0755 "$STAGE/post-fs-data.sh" "$STAGE/service.sh" "$STAGE/action.sh" "$STAGE/customize.sh"
+for file in index.html assets/style.css assets/app.js; do
+  cp -- "$ROOT_DIR/module/webroot/$file" "$STAGE/webroot/$file"
+done
+chmod 0755 "$STAGE/post-fs-data.sh" "$STAGE/service.sh" "$STAGE/action.sh" \
+  "$STAGE/customize.sh" "$STAGE/webui.sh"
 cp -- "$NATIVE_LIBRARY" "$STAGE/zygisk/arm64-v8a.so"
 
 python3 - "$STAGE/module.prop" <<'PY'

@@ -9,9 +9,13 @@ FIXTURE="$WORK_DIR/source with spaces"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/module"
 cp -- "$ROOT_DIR/scripts/package.sh" "$ROOT_DIR/scripts/verify_package.sh" \
   "$ROOT_DIR/scripts/verify_elf.sh" "$FIXTURE/scripts/"
-for file in module.prop config.json post-fs-data.sh service.sh action.sh customize.sh; do
+for file in module.prop config.json post-fs-data.sh service.sh action.sh customize.sh webui.sh; do
   cp -- "$ROOT_DIR/module/$file" "$FIXTURE/module/$file"
 done
+mkdir -p "$FIXTURE/module/webroot/assets"
+cp -- "$ROOT_DIR/module/webroot/index.html" "$FIXTURE/module/webroot/index.html"
+cp -- "$ROOT_DIR/module/webroot/assets/style.css" "$FIXTURE/module/webroot/assets/style.css"
+cp -- "$ROOT_DIR/module/webroot/assets/app.js" "$FIXTURE/module/webroot/assets/app.js"
 cp -- "$FIXTURE/module/module.prop" "$WORK_DIR/original module.prop"
 
 cat > "$WORK_DIR/native fixture.cpp" <<'CPP'
@@ -93,7 +97,7 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     properties = archive.read("module.prop").decode("utf-8").splitlines()
     assert "version=1.2.3.test" in properties
     assert "versionCode=42" in properties
-    for name in ("action.sh", "customize.sh", "post-fs-data.sh", "service.sh"):
+    for name in ("action.sh", "customize.sh", "post-fs-data.sh", "service.sh", "webui.sh"):
         assert (archive.getinfo(name).external_attr >> 16) & 0o111
 PY
 cp -- "$OUTPUT" "$WORK_DIR/previous.zip"

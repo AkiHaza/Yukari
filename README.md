@@ -72,6 +72,39 @@ untouched. Missing mappings leave ID access visible. Arrays, themes and package
 map enumeration are outside this channel. This option also defaults to true and
 is preserved by `action.sh`.
 
+### WebUI
+
+The module ships a WebUI: the frontend lives in `webroot/`, the backend in
+`webui.sh`, and both are installed from the module ZIP. The interface follows
+Material 3 Expressive, tracks the system light/dark mode, and can be overridden
+from the top-right button. Colours come from the Monet TonalSpot 2025 scheme
+generated from the seed `#6a49c8`; radii follow the M3 Expressive shape scale
+(`4 / 8 / 12 / 16 / 20 / 28 / 32 / full`), with the status panel on the 28dp
+extra-large token. Re-seed `tools/monet.py` and regenerate the tokens to change
+the hue — the script is not packaged into the module.
+
+How to open it:
+
+- **KernelSU / APatch**: the WebUI entry on the module card (native `webroot`
+  support).
+- **Magisk**: the module Action button. `action.sh` opens the interface in KSU
+  WebUI Standalone or WebUI X; when neither is installed it falls back to the
+  original terminal flow and prints the download link.
+
+The WebUI provides:
+
+- A third-party app list with search, `all / protected / stale` filters, and
+  select-all or clear with undo.
+- Checkbox changes are written to `config.json` immediately; no submit step.
+- Manual targets, including process rules such as `com.example.app:remote`.
+- The master switch plus independent `hide_features` and `hide_resources` toggles.
+- One-tap force-stop of target apps so a new config applies without a reboot.
+  Stale rules (uninstalled apps) are kept rather than dropped.
+
+Backend subcommands: `webui.sh info`, `targets`, `apps`, `save '<json>'`,
+`force-stop`. `save` accepts a single-line JSON object and replaces the config
+atomically (write `config.json.tmp`, then rename).
+
 ### Build
 
 ```bash
