@@ -102,8 +102,10 @@ The WebUI provides:
   Stale rules (uninstalled apps) are kept rather than dropped.
 
 Backend subcommands: `webui.sh info`, `targets`, `apps`, `save '<json>'`,
-`force-stop`. `save` accepts a single-line JSON object and replaces the config
+`force-stop`. `save` accepts a JSON object as one shell argument and replaces the config
 atomically (write `config.json.tmp`, then rename).
+Open the page in a supported root manager: without the native `ksu` bridge it
+shows a connection error and disables editing. Use refresh to retry a failed read.
 
 ### Build
 

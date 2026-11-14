@@ -3,7 +3,7 @@
 ## 环境与版本
 
 Linux/WSL 是脚本支持的构建环境。宿主验证需 Git、Bash、C++20 编译器、
-Python 3.9+、CMake、make、binutils 和 JDK JNI 头文件；Android 构建需 JDK 17
+Python 3.9+、CMake、make、binutils、Node.js 18+ 和 JDK JNI 头文件；Android 构建需 JDK 17
 和 Android SDK 命令行工具。
 GitHub 的 Ubuntu runner 已提供这些基础工具，构建不再调用 setup-android action。
 

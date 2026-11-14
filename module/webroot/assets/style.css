@@ -233,15 +233,6 @@ body {
     white-space: nowrap;
 }
 
-.appbar__mode {
-    font-size: 11px;
-    font-weight: 600;
-    padding: 3px 9px;
-    border-radius: var(--radius-full);
-    border: 1px solid var(--outline-variant);
-    color: var(--on-surface-variant);
-}
-
 .appbar__actions {
     display: flex;
     align-items: center;

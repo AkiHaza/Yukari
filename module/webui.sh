@@ -1,9 +1,7 @@
 #!/system/bin/sh
 # Yukari WebUI backend.
 #
-# The WebUI never parses or rewrites JSON itself: it asks this script for a
-# plain key=value snapshot and hands a complete config back through `save`.
-# Every subcommand is read-only except `save` and `force-stop`.
+# Returns key=value metadata and newline-separated package names to the WebUI.
 
 MODDIR=${0%/*}
 CONFIG="$MODDIR/config.json"
@@ -33,7 +31,7 @@ prop_of() {
 }
 
 list_targets() {
-    [ -f "$CONFIG" ] || return 0
+    [ -f "$CONFIG" ] && [ -r "$CONFIG" ] || fail "cannot read $CONFIG"
     # Works for both pretty-printed and single-line configs: flatten, take the
     # targets array, then emit one quoted entry per line.
     tr '\n' ' ' < "$CONFIG" |
@@ -51,7 +49,8 @@ current_user() {
 
 case "${1:-info}" in
     info)
-        if [ -f "$CONFIG" ]; then say "config=ready"; else say "config=missing"; fi
+        [ -f "$CONFIG" ] && [ -r "$CONFIG" ] || fail "cannot read $CONFIG"
+        say "config=ready"
         say "enabled=$(bool_of enabled)"
         say "hide_features=$(bool_of hide_features)"
         say "hide_resources=$(bool_of hide_resources)"
@@ -67,7 +66,8 @@ case "${1:-info}" in
         ;;
     apps)
         # Third-party packages only: system app IDs are excluded by the hook.
-        pm list packages -3 --user "$(current_user)" 2>/dev/null |
+        packages=$(pm list packages -3 --user "$(current_user)") || fail "cannot list installed apps"
+        printf '%s\n' "$packages" |
             sed -n 's/^package://p' |
             sort -u
         ;;

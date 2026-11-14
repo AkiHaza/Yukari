@@ -87,7 +87,9 @@ WebUI 提供：
 - 一键强制停止目标应用，让新配置立即生效；失效规则（已卸载应用）会继续保留。
 
 后端子命令：`webui.sh info`、`targets`、`apps`、`save '<json>'`、`force-stop`。
-`save` 只接受单行 JSON 对象，原子替换配置文件（先写 `config.json.tmp` 再改名）。
+`save` 接收作为一个 shell 参数传入的 JSON 对象，原子替换配置文件
+（先写 `config.json.tmp` 再改名）。页面需要管理器提供原生 `ksu` 桥接；
+缺少桥接或读取失败时显示错误并禁用编辑，可点击右上角刷新重试。
 
 ### 构建
 

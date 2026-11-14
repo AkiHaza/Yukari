@@ -52,3 +52,16 @@ headers or explicit Parcel rewinds conservatively leave feature names visible.
   unrelated resource IDs, Binder failures and application exceptions with the control.
 - Do not infer file-path, system-property, native scan, or kernel-side hiding from
   these checks. Those channels are not modified by Yukari.
+
+## WebUI backend regression
+
+With an ADB root device and Yukari installed:
+
+```sh
+adb push tests/device/webui_test.sh /data/local/tmp/webui_test.sh
+adb shell sh /data/local/tmp/webui_test.sh /data/adb/modules/Yukari
+```
+
+The test uses an isolated temporary directory and checks config reads, empty and
+process targets, save round trips, permissions and command failure propagation.
+It does not modify the installed config or stop apps.

@@ -1,11 +1,6 @@
 'use strict';
 
-/* ==========================================================================
-   Yukari WebUI
-   Talks to /data/adb/modules/Yukari/webui.sh through the root manager's
-   JavaScript bridge (ksu.exec). Without a bridge the page runs on demo data
-   so the layout can be reviewed in a normal browser.
-   ========================================================================== */
+// Yukari WebUI. Commands use the root manager's native ksu.exec bridge.
 
 const MODULE_ID = 'Yukari';
 const MODULE_DIRS = [`/data/adb/modules/${MODULE_ID}`, `/data/adb/modules_update/${MODULE_ID}`];
@@ -14,39 +9,19 @@ const NAME_RE = /^[A-Za-z0-9._]+(:[A-Za-z0-9._]+)?$/;
 const THEME_KEY = 'yukari.theme';
 const THEMES = ['auto', 'light', 'dark'];
 
-const MOCK_DIR = MODULE_DIRS[0];
-const MOCK_APPS = [
-    'com.eg.android.AlipayGphone',
-    'com.google.android.apps.walletnfcrel',
-    'com.microsoft.office.outlook',
-    'com.netflix.mediaclient',
-    'com.spotify.music',
-    'com.tencent.mm',
-    'com.tencent.mobileqq',
-    'com.ubercab',
-    'com.zhiliaoapp.musically',
-    'org.telegram.messenger',
-    'com.discord',
-    'com.airbnb.android',
-    'com.duolingo',
-    'com.google.android.apps.photos',
-    'com.squareup.cash',
-    'io.github.a13e300.ksuwebui',
-];
-
 const state = {
     dir: '',
-    mock: false,
     version: '',
-    author: '秋山葉桜',
+    author: '',
     code: '',
     flags: { enabled: true, hide_features: true, hide_resources: true },
-    targets: new Set(['com.google.android.apps.walletnfcrel', 'com.tencent.mm', 'com.squareup.cash']),
+    targets: new Set(),
     apps: [],
     filter: 'all',
     query: '',
     ready: false,
     failed: false,
+    loading: false,
     theme: readTheme(),
     saveTimer: 0,
     saveStateTimer: 0,
@@ -56,102 +31,44 @@ const el = (id) => document.getElementById(id);
 
 /* ------------------------------------------------------------------ bridge */
 
-function findBridge() {
-    const candidates = [window.ksu, window.ksud, window.ap];
-    return candidates.find((api) => api && typeof api.exec === 'function') || null;
-}
-
-const bridge = findBridge();
-
-function normalizeResult(result) {
-    if (result === null || result === undefined) return { errno: -1, stdout: '', stderr: '空结果' };
-    if (typeof result === 'string') return { errno: 0, stdout: result, stderr: '' };
-    const stdout = typeof result.stdout === 'string' ? result.stdout : '';
-    const stderr = typeof result.stderr === 'string' ? result.stderr : '';
-    const errno = typeof result.errno === 'number' ? result.errno : (stdout ? 0 : -1);
-    return { errno, stdout, stderr };
-}
+let callbackCounter = 0;
 
 function exec(command) {
-    return new Promise((resolve) => {
-        if (!bridge) {
-            resolve({ errno: 127, stdout: '', stderr: 'no bridge' });
+    return new Promise((resolve, reject) => {
+        const bridge = window.ksu;
+        if (!bridge || typeof bridge.exec !== 'function') {
+            reject(new Error('未检测到 root 桥接，请在模块 WebUI 中打开'));
             return;
         }
-        let settled = false;
-        const finish = (value) => {
-            if (settled) return;
-            settled = true;
+        const callbackName = `yukari_exec_${Date.now()}_${callbackCounter++}`;
+        const cleanup = () => {
             clearTimeout(watchdog);
-            resolve(normalizeResult(value));
+            delete window[callbackName];
         };
-        // A bridge that never invokes the callback must not freeze the UI.
-        const watchdog = setTimeout(() => finish({ errno: -1, stdout: '', stderr: '命令超时' }), 20000);
-        const callback = (...args) => {
-            if (args.length > 1) {
-                finish({ errno: Number(args[0]) || 0, stdout: args[1] ?? '', stderr: args[2] ?? '' });
-            } else {
-                finish(args[0]);
-            }
+        const watchdog = setTimeout(() => {
+            cleanup();
+            reject(new Error('命令超时，请重试'));
+        }, 20000);
+        window[callbackName] = (errno, stdout, stderr) => {
+            cleanup();
+            resolve({ errno: Number(errno), stdout: stdout || '', stderr: stderr || '' });
         };
-        let result;
         try {
-            result = bridge.exec(command, {}, callback);
+            // Android's JavascriptInterface accepts strings, not JS objects/functions.
+            bridge.exec(command, '{}', callbackName);
         } catch (error) {
-            finish({ errno: -1, stdout: '', stderr: String(error) });
-            return;
-        }
-        if (result && typeof result.then === 'function') {
-            result.then(finish, (error) => finish({ errno: -1, stdout: '', stderr: String(error) }));
-        } else if (result !== undefined && result !== null) {
-            finish(result);
+            cleanup();
+            reject(error);
         }
     });
 }
 
 async function sh(command) {
-    if (state.mock) return mockExec(command);
     const result = await exec(command);
-    if (result.errno !== 0 && !result.stdout) {
+    if (result.errno !== 0) {
         throw new Error(result.stderr.trim() || `命令退出码 ${result.errno}`);
     }
     return result.stdout;
-}
-
-function mockExec(command) {
-    if (command.includes('for d in')) return MOCK_DIR;
-    if (command.includes('webui.sh apps')) return MOCK_APPS.join('\n');
-    if (command.includes('webui.sh targets')) return [...state.targets].join('\n');
-    if (command.includes('webui.sh save')) {
-        const start = command.indexOf("save '") + 6;
-        const payload = command.slice(start, command.lastIndexOf("'"));
-        try {
-            const parsed = JSON.parse(payload);
-            state.flags.enabled = Boolean(parsed.enabled);
-            state.flags.hide_features = Boolean(parsed.hide_features);
-            state.flags.hide_resources = Boolean(parsed.hide_resources);
-            state.targets = new Set(Array.isArray(parsed.targets) ? parsed.targets : []);
-        } catch (error) {
-            throw new Error('预览模式无法解析配置');
-        }
-        return 'saved';
-    }
-    if (command.includes('webui.sh force-stop')) return `stopped=${state.targets.size}`;
-    if (command.includes('webui.sh info')) {
-        return [
-            'config=ready',
-            `enabled=${state.flags.enabled}`,
-            `hide_features=${state.flags.hide_features}`,
-            `hide_resources=${state.flags.hide_resources}`,
-            `targets=${state.targets.size}`,
-            'user=0',
-            'version=2.0.0',
-            'code=2',
-            'author=秋山葉桜',
-            `path=${MOCK_DIR}/config.json`,
-        ].join('\n');
-    }
-    return '';
 }
 
 /* -------------------------------------------------------------------- data */
@@ -171,48 +88,48 @@ function splitLines(text) {
 }
 
 async function resolveDir() {
-    const script = `for d in ${MODULE_DIRS.join(' ')}; do if [ -d "$d" ]; then echo "$d"; break; fi; done`;
+    const script = `for d in ${MODULE_DIRS.join(' ')}; do if [ -f "$d/webui.sh" ]; then echo "$d"; break; fi; done`;
     const found = (await sh(script)).trim().split('\n').filter(Boolean)[0];
-    if (!found) throw new Error('未找到 Yukari 模块目录');
+    if (!MODULE_DIRS.includes(found)) throw new Error('未找到 Yukari 模块后端');
     return found;
 }
 
 async function loadAll() {
+    if (state.loading) return false;
+    state.loading = true;
+    state.ready = false;
+    state.failed = false;
+    renderAll();
     try {
-        state.dir = await resolveDir();
-        const info = parseKV(await sh(`sh ${state.dir}/webui.sh info`));
+        const dir = await resolveDir();
+        const info = parseKV(await sh(`sh ${dir}/webui.sh info`));
+        if (info.config !== 'ready') throw new Error('配置文件不存在或不可读');
+        const targets = splitLines(await sh(`sh ${dir}/webui.sh targets`));
+        const apps = splitLines(await sh(`sh ${dir}/webui.sh apps`));
+        state.dir = dir;
         state.version = info.version || '';
         state.code = info.code || '';
         state.author = info.author || state.author;
         state.flags.enabled = info.enabled !== 'false';
         state.flags.hide_features = info.hide_features !== 'false';
         state.flags.hide_resources = info.hide_resources !== 'false';
-        state.targets = new Set(splitLines(await sh(`sh ${state.dir}/webui.sh targets`)));
-        state.apps = splitLines(await sh(`sh ${state.dir}/webui.sh apps`)).filter((name) => NAME_RE.test(name));
+        state.targets = new Set(targets.filter((name) => NAME_RE.test(name)));
+        state.apps = apps.filter((name) => NAME_RE.test(name));
         state.ready = true;
         state.failed = false;
         el('config-path').textContent = `${state.dir}/config.json`;
     } catch (error) {
-        state.ready = false;
         state.failed = true;
         snack(`读取配置失败：${error.message}`, null);
+    } finally {
+        state.loading = false;
+        renderAll();
     }
-    renderAll();
+    return state.ready;
 }
 
 function buildConfig() {
-    const targets = [...state.targets].sort();
-    const entries = targets.map((name, index) => `    "${name}"${index === targets.length - 1 ? '' : ','}`);
-    return [
-        '{',
-        `  "enabled": ${state.flags.enabled},`,
-        `  "hide_features": ${state.flags.hide_features},`,
-        `  "hide_resources": ${state.flags.hide_resources},`,
-        '  "targets": [',
-        ...entries,
-        '  ]',
-        '}',
-    ].join('\n');
+    return JSON.stringify({ ...state.flags, targets: [...state.targets].sort() }, null, 2);
 }
 
 function scheduleSave() {
@@ -220,12 +137,18 @@ function scheduleSave() {
     state.saveTimer = setTimeout(persist, 240);
 }
 
+let saveQueue = Promise.resolve();
+
 async function persist() {
     if (!state.ready) return;
+    const command = `sh ${state.dir}/webui.sh save '${buildConfig()}'`;
+    // Each save replaces the same config file; keep writes in UI order.
+    const save = saveQueue.catch(() => {}).then(() => sh(command));
+    saveQueue = save;
     setSaveState('保存中…');
     try {
-        await sh(`sh ${state.dir}/webui.sh save '${buildConfig()}'`);
-        setSaveState('已保存');
+        await save;
+        if (save === saveQueue) setSaveState('已保存');
     } catch (error) {
         setSaveState('保存失败');
         snack(`保存失败：${error.message}`, null);
@@ -300,6 +223,7 @@ function rowElement(row) {
     check.type = 'checkbox';
     check.className = 'app-check';
     check.checked = selected;
+    check.disabled = !state.ready;
     check.dataset.pkg = row.name;
     check.setAttribute('aria-label', `屏蔽 ${row.name}`);
 
@@ -345,10 +269,10 @@ function renderList() {
     list.replaceChildren(fragment);
 
     const skeleton = el('app-skeleton');
-    skeleton.hidden = state.ready || state.mock || Boolean(state.failed);
+    skeleton.hidden = state.ready || state.failed;
 
     const empty = el('app-empty');
-    const busy = !state.ready && !state.mock && !state.failed;
+    const busy = !state.ready && !state.failed;
     empty.hidden = rows.length > 0 || busy;
     if (!empty.hidden) {
         const title = empty.querySelector('.empty__title');
@@ -366,7 +290,7 @@ function renderList() {
 function renderSummary() {
     const rows = rowModel();
     const stale = rows.filter((row) => !row.installed).length;
-    const channels = state.flags.enabled
+    const channels = state.ready && state.flags.enabled
         ? 1 + (state.flags.hide_features ? 1 : 0) + (state.flags.hide_resources ? 1 : 0)
         : 0;
 
@@ -384,24 +308,32 @@ function renderSummary() {
         if (state.flags.hide_features) active.push('特性');
         if (state.flags.hide_resources) active.push('资源');
     }
-    el('hero-state').textContent = state.flags.enabled
+    el('hero-state').textContent = !state.ready
+        ? (state.failed ? '读取失败 · 点击右上角刷新重试' : '正在读取模块配置…')
+        : state.flags.enabled
         ? `已启用 · ${active.join(' / ')}`
         : '已停用 · 所有服务查询原样放行';
 
-    el('toggle-enabled').checked = state.flags.enabled;
-    el('toggle-features').checked = state.flags.hide_features;
-    el('toggle-resources').checked = state.flags.hide_resources;
-    el('toggle-features').disabled = !state.flags.enabled;
-    el('toggle-resources').disabled = !state.flags.enabled;
+    el('toggle-enabled').checked = state.ready && state.flags.enabled;
+    el('toggle-features').checked = state.ready && state.flags.hide_features;
+    el('toggle-resources').checked = state.ready && state.flags.hide_resources;
+    el('toggle-enabled').disabled = !state.ready;
+    el('toggle-features').disabled = !state.ready || !state.flags.enabled;
+    el('toggle-resources').disabled = !state.ready || !state.flags.enabled;
+    for (const id of ['select-all', 'clear-all', 'add-manual', 'manual-confirm', 'action-reset', 'action-force-stop']) {
+        el(id).disabled = !state.ready;
+    }
+    for (const check of document.querySelectorAll('.app-check')) check.disabled = !state.ready;
+    el('refresh').disabled = state.loading;
 
     el('version-badge').textContent = state.version ? `v${state.version}` : '—';
-    el('about-author').textContent = `作者 ${state.author}`;
+    el('about-author').textContent = `作者 ${state.author || '—'}`;
     el('about-version').textContent = state.version ? `版本 ${state.version} · 构建 ${state.code || '—'}` : 'Zygisk 模块';
 }
 
 function renderAll() {
-    renderSummary();
     renderList();
+    renderSummary();
 }
 
 function renderKeywords() {
@@ -551,14 +483,12 @@ function bindEvents() {
     });
 
     el('refresh').addEventListener('click', async () => {
-        if (!state.ready) return;
         const button = el('refresh');
         button.animate(
             [{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }],
             { duration: 620, easing: 'cubic-bezier(.2,0,0,1)' }
         );
-        await loadAll();
-        snack('已重新读取模块状态', null);
+        if (await loadAll()) snack('已重新读取模块状态', null);
     });
 
     for (const item of document.querySelectorAll('.navbar__item')) {
@@ -721,25 +651,10 @@ function boot() {
     renderKeywords();
     bindEvents();
 
-    if (!bridge) {
-        state.mock = true;
-        el('mode-badge').hidden = false;
-        state.apps = [...MOCK_APPS];
-    }
-
     switchView(viewFromHash(), false);
     window.addEventListener('hashchange', () => switchView(viewFromHash(), false));
 
-    if (state.mock) {
-        state.dir = MOCK_DIR;
-        state.ready = true;
-        state.version = '2.0.0';
-        state.code = '2';
-        state.author = '秋山葉桜';
-        renderAll();
-    } else {
-        loadAll();
-    }
+    loadAll();
 }
 
 boot();

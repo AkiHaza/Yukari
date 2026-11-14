@@ -11,3 +11,4 @@ local.properties
 !tests/build/
 !tests/build/**
 __pycache__/
+.workbuddy/
