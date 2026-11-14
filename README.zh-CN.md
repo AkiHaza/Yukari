@@ -56,12 +56,12 @@ Binder 缓冲区；命中的回复使用按需增长、可复用的线程本地�
 私有 Parcel；枚举仅替换已登记的 PackageManager 回复所读取的字符串。日志分别
 报告查询与枚举是否可用；JNI 方法或生命周期 ABI 不支持时，对应能力保持可见。
 覆盖 Java 调用和首次枚举回复；ParceledListSlice 延迟分片、未知回复头、主动重设
-Parcel 位置时保守放行。`action.sh` 重新生成目标列表时保留此选项。
+Parcel 位置时保守放行。
 
 `hide_resources` 独立过滤 `lineageos.platform` 的资源 ID 查询、单资源值和名称
 反查，默认开启。必须由当前 AssetManager 的包映射确认后才过滤 ID，不会把
 无关的 `0x3f` 包当成 Lineage；映射缺失时 ID 访问保持可见。资源数组、theme
-和包映射列表不在此通道范围内。`action.sh` 同样保留此选项。
+和包映射列表不在此通道范围内。
 
 ### WebUI
 
@@ -75,12 +75,14 @@ M3 Expressive 的形状刻度（`4 / 8 / 12 / 16 / 20 / 28 / 32 / full`），
 打开方式：
 
 - **KernelSU / APatch**：模块卡片上的 WebUI 入口（原生支持模块 `webroot`）。
-- **Magisk**：点击模块的 Action 按钮，`action.sh` 会在 KSU WebUI Standalone
-  或 WebUI X 中打开界面；两者都未安装时退回原来的终端流程，并提示安装地址。
+- **Magisk**：在 KSU WebUI Standalone 或 WebUI X 中直接打开 Yukari。
+  模块不再提供 Action 入口。
 
 WebUI 提供：
 
-- 第三方应用列表、搜索、`全部 / 已保护 / 失效规则` 筛选，以及全选与清空（可撤销）。
+- 第三方应用列表显示应用名和图标，支持按应用名或包名搜索、
+  `全部 / 已保护 / 失效规则` 筛选，以及全选与清空（可撤销）。
+  包名保留在副标题和配置中；无法获取信息的应用使用包名和通用图标。
 - 勾选即写入 `config.json`，自动保存，无需手动提交。
 - 手动添加包名，或写成 `com.example.app:remote` 只匹配单个进程。
 - 总开关与 `hide_features`、`hide_resources` 两条通道的独立开关。

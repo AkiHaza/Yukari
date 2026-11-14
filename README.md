@@ -63,14 +63,13 @@ tracked PackageManager feature reply. Query and enumeration support are reported
 separately. Missing JNI methods or unsupported lifecycle ABIs leave the affected
 capability visible. This covers Java calls and the initial enumeration reply;
 deferred ParceledListSlice chunks, unknown reply headers, and explicit Parcel
-repositioning are conservatively left visible. `action.sh` preserves this option.
+repositioning are conservatively left visible.
 
 `hide_resources` independently hides `lineageos.platform` resource identifiers,
 single values and name lookups. Resource IDs are filtered only after the current
 AssetManager confirms their package mapping; an unrelated `0x3f` package remains
 untouched. Missing mappings leave ID access visible. Arrays, themes and package
-map enumeration are outside this channel. This option also defaults to true and
-is preserved by `action.sh`.
+map enumeration are outside this channel. This option also defaults to true.
 
 ### WebUI
 
@@ -87,14 +86,15 @@ How to open it:
 
 - **KernelSU / APatch**: the WebUI entry on the module card (native `webroot`
   support).
-- **Magisk**: the module Action button. `action.sh` opens the interface in KSU
-  WebUI Standalone or WebUI X; when neither is installed it falls back to the
-  original terminal flow and prints the download link.
+- **Magisk**: open Yukari directly in KSU WebUI Standalone or WebUI X.
+  The module has no Action entry.
 
 The WebUI provides:
 
-- A third-party app list with search, `all / protected / stale` filters, and
-  select-all or clear with undo.
+- A third-party app list with application names and icons, search by app name or
+  package name, `all / protected / stale` filters, and select-all or clear with undo.
+  Package names remain in the subtitle and configuration; unavailable apps use a
+  generic icon and their package name.
 - Checkbox changes are written to `config.json` immediately; no submit step.
 - Manual targets, including process rules such as `com.example.app:remote`.
 - The master switch plus independent `hide_features` and `hide_resources` toggles.

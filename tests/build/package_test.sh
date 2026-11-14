@@ -9,13 +9,16 @@ FIXTURE="$WORK_DIR/source with spaces"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/module"
 cp -- "$ROOT_DIR/scripts/package.sh" "$ROOT_DIR/scripts/verify_package.sh" \
   "$ROOT_DIR/scripts/verify_elf.sh" "$FIXTURE/scripts/"
-for file in module.prop config.json post-fs-data.sh service.sh action.sh customize.sh webui.sh; do
+for file in module.prop config.json post-fs-data.sh service.sh customize.sh webui.sh; do
   cp -- "$ROOT_DIR/module/$file" "$FIXTURE/module/$file"
 done
 mkdir -p "$FIXTURE/module/webroot/assets"
 cp -- "$ROOT_DIR/module/webroot/index.html" "$FIXTURE/module/webroot/index.html"
 cp -- "$ROOT_DIR/module/webroot/assets/style.css" "$FIXTURE/module/webroot/assets/style.css"
 cp -- "$ROOT_DIR/module/webroot/assets/app.js" "$FIXTURE/module/webroot/assets/app.js"
+cp -- "$ROOT_DIR/module/webroot/assets/app-placeholder.svg" "$FIXTURE/module/webroot/assets/app-placeholder.svg"
+# A leftover from an older source tree must never restore the module action.
+printf '#!/system/bin/sh\nexit 1\n' > "$FIXTURE/module/action.sh"
 cp -- "$FIXTURE/module/module.prop" "$WORK_DIR/original module.prop"
 
 cat > "$WORK_DIR/native fixture.cpp" <<'CPP'
@@ -59,10 +62,10 @@ expect_failure bash "$FIXTURE/scripts/package.sh" --library "$WORK_DIR/missing.s
 cmp -- "$OUTPUT" "$WORK_DIR/previous.zip"
 expect_failure bash "$FIXTURE/scripts/package.sh" --library "$WORK_DIR/host library.so" --output "$OUTPUT"
 cmp -- "$OUTPUT" "$WORK_DIR/previous.zip"
-mv -- "$FIXTURE/module/action.sh" "$FIXTURE/module/action.sh.saved"
+mv -- "$FIXTURE/module/webui.sh" "$FIXTURE/module/webui.sh.saved"
 expect_failure bash "$FIXTURE/scripts/package.sh" --library "$WORK_DIR/arm64 fixture.so" --output "$OUTPUT"
 cmp -- "$OUTPUT" "$WORK_DIR/previous.zip"
-mv -- "$FIXTURE/module/action.sh.saved" "$FIXTURE/module/action.sh"
+mv -- "$FIXTURE/module/webui.sh.saved" "$FIXTURE/module/webui.sh"
 no_staging_files "$(dirname -- "$OUTPUT")"
 expect_failure bash "$FIXTURE/scripts/package.sh" --library
 expect_failure bash "$FIXTURE/scripts/package.sh" --unknown
@@ -97,7 +100,9 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
     properties = archive.read("module.prop").decode("utf-8").splitlines()
     assert "version=1.2.3.test" in properties
     assert "versionCode=42" in properties
-    for name in ("action.sh", "customize.sh", "post-fs-data.sh", "service.sh", "webui.sh"):
+    assert "action.sh" not in archive.namelist()
+    assert archive.read("webroot/assets/app-placeholder.svg").startswith(b"<svg")
+    for name in ("customize.sh", "post-fs-data.sh", "service.sh", "webui.sh"):
         assert (archive.getinfo(name).external_attr >> 16) & 0o111
 PY
 cp -- "$OUTPUT" "$WORK_DIR/previous.zip"
@@ -137,6 +142,8 @@ def fixture(name, *, omit=None, extra=None, replace=None):
                 archive.writestr(extra, b"unexpected")
 
 fixture("missing", omit="service.sh")
+fixture("missing-placeholder", omit="webroot/assets/app-placeholder.svg")
+fixture("obsolete-action", extra="action.sh")
 fixture("duplicate", extra="module.prop")
 fixture("parent", extra="../escape")
 fixture("absolute", extra="/absolute")
@@ -163,7 +170,7 @@ name_size, extra_size = struct.unpack_from("<HH", corrupt, offset + 26)
 corrupt[offset + 30 + name_size + extra_size] ^= 1
 corrupt_path.write_bytes(corrupt)
 PY
-for name in missing duplicate parent absolute backslash drive double-slash file-parent symlink \
+for name in missing missing-placeholder obsolete-action duplicate parent absolute backslash drive double-slash file-parent symlink \
   bad-properties duplicate-properties bad-version-code wrong-abi bad-crc; do
   expect_failure bash "$FIXTURE/scripts/verify_package.sh" "$WORK_DIR/$name.zip"
 done

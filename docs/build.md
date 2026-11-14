@@ -54,7 +54,8 @@ bash scripts/package.sh --library /path/to/libyukari.so --output /path/to/Yukari
 ELF 验证要求 AArch64 动态库且仅导出 Zygisk 入口；ZIP 验证检查必要文件、
 重复/危险路径、CRC 和模块属性。暂存内容除脚本与 `zygisk/arm64-v8a.so` 外，
 还包括 WebUI 的 `webroot/index.html`、`webroot/assets/style.css`、
-`webroot/assets/app.js` 与后端 `webui.sh`；`webui.sh` 与其他入口脚本同为
+`webroot/assets/app.js`、缺省图标 `webroot/assets/app-placeholder.svg` 与后端
+`webui.sh`；模块不包含 `action.sh`。`webui.sh` 与其他入口脚本同为
 `0755`，`webroot` 下的静态文件为 `0644`，缺失任一文件都会使打包失败。
 
 WebUI 的颜色令牌由 `tools/monet.py` 按 Monet 的 TonalSpot 2025 方案生成，

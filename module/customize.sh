@@ -63,8 +63,8 @@ if [ "$KEEP_CONFIG" -eq 1 ] && [ -f "$BACKUP_CONFIG" ]; then
 fi
 
 # Set permissions
+rm -f "$MODPATH/action.sh"
 set_perm_recursive "$MODPATH" 0 0 0755 0644
-set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/customize.sh" 0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/service.sh" 0 0 0755
@@ -72,7 +72,7 @@ set_perm "$MODPATH/webui.sh" 0 0 0755
 set_perm "$MODPATH/config.json" 0 0 0644
 
 ui_print "- Installation complete"
-ui_print "- Tap the module Action button to open the WebUI"
-ui_print "  (needs KSU WebUI Standalone or WebUI X on Magisk)"
+ui_print "- Open Yukari from your manager's WebUI entry"
+ui_print "  (on Magisk, open Yukari in KSU WebUI Standalone or WebUI X)"
 ui_print "- Or manually edit:"
 ui_print "  /data/adb/modules/Yukari/config.json"

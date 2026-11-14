@@ -16,6 +16,8 @@ real SDK licenses.
   validation, JDK selection and staged CI versions without changing source metadata.
 - WebUI tests use the native string-based `ksu.exec` callback signature and check
   loading, command errors, timeouts, callback cleanup and retry after failure.
+  App display checks cover localized labels, current-user metadata, native icon
+  URLs, icon fallback, name/package search and distinct package/process rules.
 
 Real Android validation requires the SDK/NDK path in `scripts/build.sh android`;
 host fixture results do not imply that Gradle, the NDK or a device passed.

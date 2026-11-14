@@ -27,8 +27,9 @@ import zlib
 
 required = {
     "module.prop", "config.json", "post-fs-data.sh", "service.sh",
-    "action.sh", "customize.sh", "webui.sh", "zygisk/arm64-v8a.so",
+    "customize.sh", "webui.sh", "zygisk/arm64-v8a.so",
     "webroot/index.html", "webroot/assets/style.css", "webroot/assets/app.js",
+    "webroot/assets/app-placeholder.svg",
 }
 
 def fail(message):
@@ -65,6 +66,8 @@ try:
                 parent = "/".join(parts[:depth])
                 if parent in paths and not paths[parent]:
                     fail(f"ZIP file used as a parent directory: {parent!r}")
+        if "action.sh" in entries:
+            fail("obsolete action.sh must not be packaged")
         missing = sorted(required - entries.keys())
         if missing:
             fail("missing required ZIP files: " + ", ".join(missing))

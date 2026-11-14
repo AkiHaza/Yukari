@@ -17,6 +17,7 @@ const state = {
     flags: { enabled: true, hide_features: true, hide_resources: true },
     targets: new Set(),
     apps: [],
+    appInfo: new Map(),
     filter: 'all',
     query: '',
     ready: false,
@@ -87,6 +88,41 @@ function splitLines(text) {
     return text.split('\n').map((line) => line.trim()).filter(Boolean);
 }
 
+function packageOf(target) {
+    return target.split(':', 1)[0];
+}
+
+function loadAppInfo(targets, userId) {
+    const packages = new Set(targets.map(packageOf));
+    const providers = [];
+    try {
+        if (typeof window.ksu?.pm === 'function') providers.push(window.ksu.pm());
+    } catch (error) {
+        console.warn('Package manager bridge unavailable', error);
+    }
+    providers.push(window.ksu);
+    for (const api of providers) {
+        if (!api || typeof api.getPackagesInfo !== 'function') continue;
+        try {
+            const entries = JSON.parse(api.getPackagesInfo(JSON.stringify([...packages])));
+            if (!Array.isArray(entries)) continue;
+            const apps = new Map();
+            for (const entry of entries) {
+                if (!entry || entry.error || !packages.has(entry.packageName)) continue;
+                const entryUser = Number.isInteger(entry.userId) ? entry.userId
+                    : Number.isInteger(entry.uid) ? Math.floor(entry.uid / 100000) : userId;
+                if (entryUser !== userId || typeof entry.appLabel !== 'string') continue;
+                const label = entry.appLabel.trim();
+                if (label) apps.set(entry.packageName, { label });
+            }
+            return apps;
+        } catch (error) {
+            console.warn('Unable to read app names', error);
+        }
+    }
+    return new Map();
+}
+
 async function resolveDir() {
     const script = `for d in ${MODULE_DIRS.join(' ')}; do if [ -f "$d/webui.sh" ]; then echo "$d"; break; fi; done`;
     const found = (await sh(script)).trim().split('\n').filter(Boolean)[0];
@@ -104,8 +140,9 @@ async function loadAll() {
         const dir = await resolveDir();
         const info = parseKV(await sh(`sh ${dir}/webui.sh info`));
         if (info.config !== 'ready') throw new Error('配置文件不存在或不可读');
-        const targets = splitLines(await sh(`sh ${dir}/webui.sh targets`));
-        const apps = splitLines(await sh(`sh ${dir}/webui.sh apps`));
+        const targets = splitLines(await sh(`sh ${dir}/webui.sh targets`)).filter((name) => NAME_RE.test(name));
+        const apps = splitLines(await sh(`sh ${dir}/webui.sh apps`)).filter((name) => NAME_RE.test(name));
+        const appInfo = loadAppInfo([...apps, ...targets], Number(info.user || 0));
         state.dir = dir;
         state.version = info.version || '';
         state.code = info.code || '';
@@ -113,8 +150,9 @@ async function loadAll() {
         state.flags.enabled = info.enabled !== 'false';
         state.flags.hide_features = info.hide_features !== 'false';
         state.flags.hide_resources = info.hide_resources !== 'false';
-        state.targets = new Set(targets.filter((name) => NAME_RE.test(name)));
-        state.apps = apps.filter((name) => NAME_RE.test(name));
+        state.targets = new Set(targets);
+        state.apps = apps;
+        state.appInfo = appInfo;
         state.ready = true;
         state.failed = false;
         el('config-path').textContent = `${state.dir}/config.json`;
@@ -185,30 +223,29 @@ function applyTheme(theme) {
 
 function rowModel() {
     const known = new Set(state.apps);
-    const rows = state.apps.map((name) => ({ name, installed: true }));
-    for (const name of state.targets) {
-        if (!known.has(name)) rows.push({ name, installed: false });
+    const names = new Set([...state.apps, ...state.targets]);
+    const rows = [];
+    for (const name of names) {
+        const packageName = packageOf(name);
+        const info = state.appInfo.get(packageName);
+        rows.push({
+            name, packageName,
+            label: info?.label || packageName,
+            installed: known.has(packageName) || Boolean(info),
+        });
     }
-    rows.sort((a, b) => a.name.localeCompare(b.name));
+    rows.sort((a, b) => a.label.localeCompare(b.label) || a.name.localeCompare(b.name));
     return rows;
 }
 
 function visibleRows() {
     const query = state.query.trim().toLowerCase();
     return rowModel().filter((row) => {
-        if (query && !row.name.toLowerCase().includes(query)) return false;
+        if (query && !row.label.toLowerCase().includes(query) && !row.name.toLowerCase().includes(query)) return false;
         if (state.filter === 'selected') return state.targets.has(row.name);
         if (state.filter === 'stale') return !row.installed;
         return true;
     });
-}
-
-function avatarTone(name) {
-    let hash = 0;
-    for (let index = 0; index < name.length; index += 1) {
-        hash = (hash * 31 + name.charCodeAt(index)) % 9973;
-    }
-    return (hash % 6) + 1;
 }
 
 function rowElement(row) {
@@ -225,30 +262,30 @@ function rowElement(row) {
     check.checked = selected;
     check.disabled = !state.ready;
     check.dataset.pkg = row.name;
-    check.setAttribute('aria-label', `屏蔽 ${row.name}`);
+    check.setAttribute('aria-label', `屏蔽 ${row.label}（${row.name}）`);
 
-    const avatar = document.createElement('span');
-    avatar.className = 'avatar';
-    avatar.dataset.tone = String(avatarTone(row.name));
-    avatar.textContent = row.name.replace(/^(com|org|io|net|me)\./, '').charAt(0) || '?';
+    const icon = document.createElement('img');
+    icon.className = 'app-icon';
+    icon.alt = '';
+    icon.width = 38;
+    icon.height = 38;
+    icon.loading = 'lazy';
+    icon.decoding = 'async';
+    icon.addEventListener('error', () => { icon.src = 'assets/app-placeholder.svg'; }, { once: true });
+    icon.src = row.installed ? `ksu://icon/${encodeURIComponent(row.packageName)}` : 'assets/app-placeholder.svg';
 
     const body = document.createElement('span');
     body.className = 'app-body';
     const name = document.createElement('span');
     name.className = 'app-name';
-    name.textContent = row.name;
+    name.textContent = row.label;
+    name.title = row.label;
     const meta = document.createElement('span');
     meta.className = 'app-meta';
-    if (!row.installed) {
-        meta.textContent = '未安装 · 规则保留';
-    } else if (row.name.includes(':')) {
-        meta.textContent = selected ? '进程规则 · 已保护' : '进程规则';
-    } else {
-        meta.textContent = selected ? '已保护 · 第三方应用' : '第三方应用';
-    }
+    meta.textContent = row.name;
     body.append(name, meta);
 
-    label.append(check, avatar, body);
+    label.append(check, icon, body);
 
     if (!row.installed) {
         const badge = document.createElement('span');

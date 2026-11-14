@@ -73,13 +73,13 @@ trap 'exit 143' TERM
 STAGE="$WORK_DIR/stage"
 TEMP_ZIP="$WORK_DIR/Yukari.zip"
 mkdir -p -- "$STAGE/zygisk" "$STAGE/webroot/assets"
-for file in module.prop config.json post-fs-data.sh service.sh action.sh customize.sh webui.sh; do
+for file in module.prop config.json post-fs-data.sh service.sh customize.sh webui.sh; do
   cp -- "$ROOT_DIR/module/$file" "$STAGE/$file"
 done
-for file in index.html assets/style.css assets/app.js; do
+for file in index.html assets/style.css assets/app.js assets/app-placeholder.svg; do
   cp -- "$ROOT_DIR/module/webroot/$file" "$STAGE/webroot/$file"
 done
-chmod 0755 "$STAGE/post-fs-data.sh" "$STAGE/service.sh" "$STAGE/action.sh" \
+chmod 0755 "$STAGE/post-fs-data.sh" "$STAGE/service.sh" \
   "$STAGE/customize.sh" "$STAGE/webui.sh"
 cp -- "$NATIVE_LIBRARY" "$STAGE/zygisk/arm64-v8a.so"
 
